@@ -42,22 +42,22 @@ yt_transcript.py <url> [output_filename] [options]
 
 ```bash
 # Save transcript with auto-generated filename
-uv run yt_transcript.py "https://youtu.be/dQw4w9WgXcQ"
+uv run yt_transcript.py "https://www.youtube.com/watch?v=M30gp1315Y4"
 
 # Custom output filename
-uv run yt_transcript.py "https://youtu.be/dQw4w9WgXcQ" -o my_notes.txt
+uv run yt_transcript.py "https://www.youtube.com/watch?v=M30gp1315Y4" -o my_notes.txt
 
 # Include timestamps
-uv run yt_transcript.py "https://youtu.be/dQw4w9WgXcQ" -t
+uv run yt_transcript.py "https://www.youtube.com/watch?v=M30gp1315Y4" -t
 
 # Reformat into readable prose
-uv run yt_transcript.py "https://youtu.be/dQw4w9WgXcQ" -r
+uv run yt_transcript.py "https://www.youtube.com/watch?v=M30gp1315Y4" -r
 
 # Full ML-based reformatting (requires extra deps)
-uv run yt_transcript.py "https://youtu.be/dQw4w9WgXcQ" -r -m full
+uv run yt_transcript.py "https://www.youtube.com/watch?v=M30gp1315Y4" -r -m full
 
 # Spanish transcript
-uv run yt_transcript.py "https://youtu.be/dQw4w9WgXcQ" -l es
+uv run yt_transcript.py "https://www.youtube.com/watch?v=M30gp1315Y4" -l es
 ```
 
 ## Requirements

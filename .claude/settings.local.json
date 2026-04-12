@@ -1,0 +1,7 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(/mnt/d/Documents/Code/GitHub/PythonUtils/.venv_linux/bin/python3 -c ':*)"
+    ]
+  }
+}
