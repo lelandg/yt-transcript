@@ -1,0 +1,7 @@
+youtube-transcript-api>=1.0.0
+
+# Optional: enables `--reformat --reformat-model full`
+# Downloads a ~500MB HuggingFace model on first use.
+# NOTE: deepmultilingualpunctuation 1.0.1 is incompatible with transformers>=5
+# (removed `grouped_entities` kwarg). Pin transformers<5 until upstream updates.
+#   pip install "deepmultilingualpunctuation>=1.0" "transformers<5" nltk
