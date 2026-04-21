@@ -5,13 +5,17 @@ Download YouTube video transcripts and save them as text files. Optionally refor
 ## Quick Start
 
 ```bash
-# With uv (recommended — zero setup)
-uv run yt_transcript.py "https://www.youtube.com/watch?v=VIDEO_ID"
-
-# With pip
+# Create a venv and install deps (one-time)
+python -m venv .venv
+source .venv/bin/activate        # Linux/WSL/macOS
+# .\.venv\Scripts\Activate.ps1   # PowerShell
 pip install -r requirements.txt
+
+# Run
 python yt_transcript.py "https://www.youtube.com/watch?v=VIDEO_ID"
 ```
+
+> **Note on `uv run`:** `uv run yt_transcript.py ...` also works, but it installs the *latest* `youtube-transcript-api` into a fresh cache each time. Newer releases of that library trip YouTube's bot-block on residential IPs noticeably more often than the pinned version in `requirements.txt`. If you hit `RequestBlocked` / `IpBlocked` errors with `uv`, switch to a plain venv as shown above.
 
 ## Features
 
@@ -42,28 +46,52 @@ yt_transcript.py <url> [output_filename] [options]
 
 ```bash
 # Save transcript with auto-generated filename
-uv run yt_transcript.py "https://www.youtube.com/watch?v=M30gp1315Y4"
+python yt_transcript.py "https://www.youtube.com/watch?v=M30gp1315Y4"
 
 # Custom output filename
-uv run yt_transcript.py "https://www.youtube.com/watch?v=M30gp1315Y4" -o my_notes.txt
+python yt_transcript.py "https://www.youtube.com/watch?v=M30gp1315Y4" -o my_notes.txt
 
 # Include timestamps
-uv run yt_transcript.py "https://www.youtube.com/watch?v=M30gp1315Y4" -t
+python yt_transcript.py "https://www.youtube.com/watch?v=M30gp1315Y4" -t
 
 # Reformat into readable prose
-uv run yt_transcript.py "https://www.youtube.com/watch?v=M30gp1315Y4" -r
+python yt_transcript.py "https://www.youtube.com/watch?v=M30gp1315Y4" -r
 
 # Full ML-based reformatting (requires extra deps)
-uv run yt_transcript.py "https://www.youtube.com/watch?v=M30gp1315Y4" -r -m full
+python yt_transcript.py "https://www.youtube.com/watch?v=M30gp1315Y4" -r -m full
 
 # Spanish transcript
-uv run yt_transcript.py "https://www.youtube.com/watch?v=M30gp1315Y4" -l es
+python yt_transcript.py "https://www.youtube.com/watch?v=M30gp1315Y4" -l es
+```
+
+## Claude Code integration
+
+This repo ships a project-local [Claude Code](https://docs.claude.com/claude-code) skill at `.claude/skills/yt-transcript/` and a matching slash command at `.claude/commands/yt-transcript.md`. Open the repo in Claude Code and either:
+
+- Paste a YouTube URL into chat — the skill description triggers it automatically.
+- Run `/yt-transcript <url>` — explicit invocation.
+
+The skill uses a bundled wrapper (`scripts/run.ps1` on Windows, `scripts/run.sh` on Linux/WSL/macOS) that:
+
+1. cd's into the project root
+2. Picks an existing venv (`.venv_linux` or `.venv_windows` preferred over `.venv`), or creates one
+3. Installs `requirements.txt` on first run
+4. Runs `yt_transcript.py` with the URL and any extra flags
+
+You can invoke the wrappers directly too — they're portable (they resolve the project root relative to themselves):
+
+```powershell
+& ".\.claude\skills\yt-transcript\scripts\run.ps1" "https://www.youtube.com/watch?v=VIDEO_ID" -t
+```
+
+```bash
+bash ./.claude/skills/yt-transcript/scripts/run.sh "https://www.youtube.com/watch?v=VIDEO_ID" -t
 ```
 
 ## Requirements
 
 - Python 3.10+
-- `youtube-transcript-api` (installed automatically with `uv run`)
+- `youtube-transcript-api` (installed via `requirements.txt`)
 
 Optional for `--reformat-model full`:
 
