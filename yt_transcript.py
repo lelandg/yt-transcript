@@ -25,6 +25,7 @@ this tool's own Notes folder. See ytt/paths.py.
 from __future__ import annotations
 
 import argparse
+import json
 import logging
 import re
 import sys
@@ -38,15 +39,22 @@ log = logging.getLogger("yt_transcript")
 
 
 def setup_logging(verbose: bool, quiet: bool) -> None:
+    """Console logging at the chosen level, plus warnings and errors to the per-user log file."""
     level = logging.DEBUG if verbose else logging.WARNING if quiet else logging.INFO
     for stream in (sys.stdout, sys.stderr):
         try:  # Windows consoles default to a legacy code page; titles are often non-ASCII
             stream.reconfigure(encoding="utf-8", errors="replace")
         except (AttributeError, OSError):
             pass
+    # main() may run more than once in a process (tests, callers): drop and
+    # close only the handlers a previous call added; keep any the caller set.
+    for h in [h for h in log.handlers if getattr(h, "_ytt_owned", False)]:
+        log.removeHandler(h)
+        h.close()
     console = logging.StreamHandler(sys.stdout)
     console.setFormatter(logging.Formatter("%(levelname)s: %(message)s"))
     console.setLevel(level)
+    console._ytt_owned = True  # type: ignore[attr-defined]
     log.setLevel(logging.DEBUG)
     log.addHandler(console)
     # Warnings and errors also go to a per-user log file, on every OS.
@@ -56,12 +64,14 @@ def setup_logging(verbose: bool, quiet: bool) -> None:
         fh = logging.FileHandler(logfile, encoding="utf-8")
         fh.setLevel(logging.WARNING)
         fh.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(message)s"))
+        fh._ytt_owned = True  # type: ignore[attr-defined]
         log.addHandler(fh)
     except OSError:
         pass
 
 
 def build_parser() -> argparse.ArgumentParser:
+    """The command-line interface: outputs, transcript, summary, screenshot, and misc options."""
     p = argparse.ArgumentParser(
         description="Turn a YouTube video into Markdown notes (summary, chapters, timestamped transcript), "
         "optionally with HTML, text, JSON, and screenshots.",
@@ -117,16 +127,62 @@ def _same_video(md_path: Path, video_id: str) -> bool:
     """True when the notes file at md_path was written for this video."""
     try:
         head = md_path.read_text(encoding="utf-8").split(summary.MD_START, 1)[0]
-    except OSError:
+    except (OSError, UnicodeDecodeError):  # unreadable: treat as someone else's
         return False
     return f"v={video_id}" in head
+
+
+def _name_taken(out_dir: Path, stem: str, video_id: str) -> bool:
+    """True when files under this name exist and are not this video's.
+
+    The .md (when present) and every sibling (.html/.txt/.json) must be
+    provably this video's: a sibling naming another video, or one whose owner
+    cannot be read, makes the name taken, because a re-run rewrites siblings.
+    A _files folder with nothing that proves its owner is taken too. Links
+    inside a summary or description never count: only each format's metadata.
+    """
+    md = out_dir / f"{stem}.md"
+    siblings = [out_dir / f"{stem}{s}" for s in (".html", ".txt", ".json")]
+    present = [p for p in siblings if p.exists()]
+    if md.exists() and not _same_video(md, video_id):
+        return True
+    if not md.exists() and not present:
+        return (out_dir / f"{stem}_files").exists()
+    return any(_sibling_video_id(p) != video_id for p in present)
+
+
+def _sibling_video_id(path: Path) -> str | None:
+    """The video id recorded in a sibling's metadata, or None if unknown."""
+    try:
+        text = path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
+        return None
+    if path.suffix == ".json":
+        try:
+            d = json.loads(text)
+        except ValueError:
+            return None
+        vid = d.get("video_id") if isinstance(d, dict) else None
+        return vid if isinstance(vid, str) else None  # [] / {} would be unhashable
+    if path.suffix == ".html":
+        m = re.search(r'<meta name="yt-video-id" content="([A-Za-z0-9_-]{11})">', text.split("</head>", 1)[0])
+        if m:
+            return m.group(1)
+        # Pages from before v0.1.2 have no meta tag; their header's
+        # "Watch on YouTube" link (written before the summary) names the video.
+        header = text.split('id="summary"', 1)[0]
+        m = re.search(r'href="https://www\.youtube\.com/watch\?v=([A-Za-z0-9_-]{11})">Watch on YouTube</a>', header)
+        return m.group(1) if m else None
+    # .txt: the header (title, metadata line, URL) ends where [summary] starts.
+    m = re.search(r"watch\?v=([A-Za-z0-9_-]{11})", text.split("[summary]", 1)[0])
+    return m.group(1) if m else None
 
 
 def _existing_written_summary(md_path: Path, video_id: str) -> str | None:
     """Keep a summary someone already wrote when the same video's notes are regenerated."""
     try:
         t = md_path.read_text(encoding="utf-8")
-    except OSError:
+    except (OSError, UnicodeDecodeError):
         return None
     # Same filename, different video (e.g. a reused -o name): never carry it over.
     if f"v={video_id}" not in t.split(summary.MD_START, 1)[0]:
@@ -141,6 +197,7 @@ def _existing_written_summary(md_path: Path, video_id: str) -> str | None:
 
 
 def main(argv: list[str] | None = None) -> int:
+    """Fetch (or load from cache), format, capture screenshots, and write every requested output."""
     args = build_parser().parse_args(argv)
     setup_logging(args.verbose, args.quiet)
     t0 = time.monotonic()
@@ -186,6 +243,15 @@ def main(argv: list[str] | None = None) -> int:
     out_dir.mkdir(parents=True, exist_ok=True)
     name = args.output or args.output_pos
     stem = paths.sanitize_filename(paths.strip_note_suffix(Path(name).name) if name else data.title)
+    if _name_taken(out_dir, stem, data.video_id):
+        # Another video already owns this name (same title, or a reused -o):
+        # never overwrite its notes or delete its screenshots. Every fallback
+        # name is checked the same way, since it can be taken too.
+        base, n = stem, 1
+        while _name_taken(out_dir, stem, data.video_id):
+            stem = f"{base} [{data.video_id}]" + (f" {n}" if n > 1 else "")
+            n += 1
+        log.warning("%s belongs to another video; writing %s.md instead", base, stem)
     md_path = out_dir / f"{stem}.md"
     log.info("Output folder: %s (%s)", out_dir, why)
 

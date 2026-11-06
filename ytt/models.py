@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 from dataclasses import asdict, dataclass, field
 
 
@@ -64,6 +65,7 @@ class VideoData:
 
     @classmethod
     def from_dict(cls, d: dict) -> "VideoData":
+        """Rebuild from to_dict() output, ignoring unknown keys."""
         d = dict(d)
         d["chapters"] = [Chapter(**c) for c in d.get("chapters", [])]
         d["segments"] = [Segment(**s) for s in d.get("segments", [])]
@@ -97,16 +99,24 @@ def parse_time(value: str) -> float:
                 raise ValueError(f"bad time: {value!r}")
         if num:
             total += float(num)
-        return total
+        return _checked_time(total, value)
     parts = v.split(":")
     if len(parts) > 3:
         raise ValueError(f"bad time: {value!r}")
     total = 0.0
     for p in parts:
         total = total * 60 + float(p)
+    return _checked_time(total, value)
+
+
+def _checked_time(total: float, value: str) -> float:
+    """Reject inf, nan, and negative times (float() accepts all three)."""
+    if not math.isfinite(total) or total < 0:
+        raise ValueError(f"bad time: {value!r}")
     return total
 
 
 def watch_url(video_id: str, t: float | None = None) -> str:
+    """The video's watch URL, optionally starting at second t."""
     base = f"https://www.youtube.com/watch?v={video_id}"
     return f"{base}&t={int(t)}s" if t is not None else base

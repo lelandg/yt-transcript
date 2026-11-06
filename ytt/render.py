@@ -42,6 +42,7 @@ def layout(data: VideoData, paragraphs: list[Paragraph], shots: list[Shot]) -> l
 
 
 def _meta_bits(data: VideoData) -> list[tuple[str, str]]:
+    """Label/value pairs for the metadata line, skipping unknown fields."""
     bits = []
     if data.channel:
         bits.append(("Channel", data.channel))
@@ -64,6 +65,7 @@ def display_title(data: VideoData) -> str:
 
 
 def _shot_caption(s: Shot) -> str:
+    """Why a screenshot was taken, for its caption."""
     return " · ".join(s.reasons) if s.reasons else "Screenshot"
 
 
@@ -83,6 +85,7 @@ def _md_ts(data: VideoData, t: float) -> str:
 
 
 def summary_block_md(auto: list[tuple[float, str]], data: VideoData, written: str | None) -> str:
+    """The written summary if there is one, else the auto-extracted sentences."""
     if written:
         return written.strip()
     if not auto:
@@ -100,6 +103,7 @@ def render_md(
     *,
     timestamps: bool = True,
 ) -> str:
+    """The Markdown notes: header, summary, chapters, transcript with shots, description."""
     out = [f"# {display_title(data)}", ""]
     meta = " · ".join(f"**{k}:** {v}" for k, v in _meta_bits(data))
     if data.channel and data.channel_url:
@@ -141,6 +145,7 @@ def render_md(
 
 
 def render_txt(data: VideoData, paragraphs: list[Paragraph], shots: list[Shot], summary_md: str, *, timestamps: bool = True) -> str:
+    """Plain-text notes with the same sections as the Markdown."""
     title = display_title(data)
     out = [title, "=" * min(len(title), 80)]
     out.append(" | ".join(f"{k}: {v}" for k, v in _meta_bits(data)))
@@ -167,6 +172,7 @@ def render_txt(data: VideoData, paragraphs: list[Paragraph], shots: list[Shot], 
 
 
 def render_json(data: VideoData, paragraphs: list[Paragraph], shots: list[Shot], summary_md: str) -> str:
+    """Everything as JSON: metadata, segments, paragraphs, shots, and summary."""
     d = data.to_dict()
     d["paragraphs"] = [asdict(p) for p in paragraphs]
     d["shots"] = [asdict(s) for s in shots]
@@ -252,11 +258,25 @@ _JS = """
     if(!v){items.concat(others).forEach(function(e){e.classList.remove('hide');});hits.textContent='';return;}
     var re=new RegExp('('+esc(v)+')','gi');
     items.forEach(function(p){
-      var a=p.querySelector('a.ts'),body=p.innerHTML.slice(a?a.outerHTML.length:0);
+      var a=p.querySelector('a.ts');
       var plain=p.textContent.slice(a?a.textContent.length:0);
-      if(re.test(plain)){n++;p.classList.remove('hide');
-        p.innerHTML=(a?a.outerHTML:'')+body.replace(/(^|>)([^<]+)/g,function(m,g1,g2){return g1+g2.replace(re,'<mark>$1</mark>');});}
-      else p.classList.add('hide');re.lastIndex=0;});
+      re.lastIndex=0;
+      if(!re.test(plain)){p.classList.add('hide');return;}
+      n++;p.classList.remove('hide');
+      // Highlight text nodes only (never markup or entities), skipping the timestamp link.
+      var w=document.createTreeWalker(p,NodeFilter.SHOW_TEXT),nodes=[],t;
+      while((t=w.nextNode())){if(!(a&&a.contains(t)))nodes.push(t);}
+      nodes.forEach(function(t){
+        var s=t.nodeValue,frag=document.createDocumentFragment(),last=0,m;
+        re.lastIndex=0;
+        while((m=re.exec(s))){
+          frag.appendChild(document.createTextNode(s.slice(last,m.index)));
+          var mk=document.createElement('mark');mk.textContent=m[0];frag.appendChild(mk);
+          last=m.index+m[0].length;
+        }
+        if(last){frag.appendChild(document.createTextNode(s.slice(last)));t.parentNode.replaceChild(frag,t);}
+      });
+    });
     others.forEach(function(e){e.classList.add('hide');});
     hits.textContent=n+' match'+(n===1?'':'es');
   }
@@ -273,6 +293,7 @@ _JS = """
 
 
 def _img_src(rel: str, base_dir: Path, embed: bool) -> str:
+    """Image path for the HTML, or a data: URI when embedding."""
     if embed:
         p = base_dir / rel
         try:
@@ -297,6 +318,7 @@ def render_html(
     timestamps: bool = True,
     embed_images: bool = False,
 ) -> str:
+    """A standalone HTML page with search, gallery, lightbox, and light/dark themes."""
     e = html.escape
     meta = "".join(
         f"<span><b>{e(k)}:</b> " + (f'<a href="{e(data.channel_url)}">{e(v)}</a>' if k == "Channel" and data.channel_url else e(v)) + "</span>"
@@ -361,6 +383,7 @@ def render_html(
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="color-scheme" content="light dark">
+<meta name="yt-video-id" content="{e(data.video_id)}">
 <title>{e(display_title(data))}</title>
 <style>{_CSS}</style>
 </head>

@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import hashlib
 import os
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -40,14 +41,17 @@ CLONE_TO = HOME / "code" / "yt-transcript"
 
 
 def say(msg: str) -> None:
+    """Progress line on stderr, so stdout stays the tool's own output."""
     print(f">>> {msg}", file=sys.stderr, flush=True)
 
 
 def is_project(p: Path) -> bool:
+    """True when the folder is a yt-transcript checkout."""
     return (p / "yt_transcript.py").is_file() and (p / "requirements.txt").is_file()
 
 
 def find_project() -> Path:
+    """Locate the checkout: env var, this file's repo, common paths, else clone it."""
     env = os.environ.get("YT_TRANSCRIPT_PROJECT")
     if env:
         p = Path(env).expanduser()
@@ -72,10 +76,12 @@ def find_project() -> Path:
 
 
 def venv_python(venv: Path) -> Path:
+    """The venv's interpreter path on this OS."""
     return venv / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
 
 
 def ensure_venv(project: Path) -> Path:
+    """Find or create this OS's venv and install requirements when they changed."""
     tag = {"win32": ".venv_windows", "darwin": ".venv_mac"}.get(sys.platform, ".venv_linux")
     for name in (tag, ".venv"):
         py = venv_python(project / name)
@@ -84,8 +90,21 @@ def ensure_venv(project: Path) -> Path:
             break
     else:
         venv = project / tag
+        if venv.exists():
+            # Never delete a folder this run did not create: it may hold someone's work.
+            sys.exit(
+                f"ERROR: {venv} exists but has no Python interpreter. "
+                f"Delete or rename it yourself, then run this again."
+            )
         say(f"Creating {venv}")
-        subprocess.run([sys.executable, "-m", "venv", str(venv)], check=True)
+        if subprocess.run([sys.executable, "-m", "venv", str(venv)]).returncode != 0:
+            # We created it just now, so a half-built venv (python but no pip)
+            # is ours to remove; otherwise the next run would reuse it.
+            shutil.rmtree(venv, ignore_errors=True)
+            sys.exit(
+                f"ERROR: could not create {venv}. On Debian/Ubuntu install python3-venv "
+                f"(sudo apt install python3-venv), then run this again."
+            )
     py = venv_python(venv)
 
     req = project / "requirements.txt"
@@ -95,12 +114,19 @@ def ensure_venv(project: Path) -> Path:
     have = stamp.read_text().strip() if stamp.exists() else ""
     if have != want:
         say(f"Installing requirements into {venv.name}")
-        subprocess.run([str(py), "-m", "pip", "install", "--quiet", "--disable-pip-version-check", "-r", str(req)], check=True)
+        cmd = [str(py), "-m", "pip", "install", "--quiet", "--disable-pip-version-check", "-r", str(req)]
+        if subprocess.run(cmd).returncode != 0:
+            # No stamp is written, so the next run retries the install.
+            sys.exit(
+                f"ERROR: installing requirements into {venv} failed (see pip's output above). "
+                f"Fix the cause and run again, or delete {venv} to rebuild it."
+            )
         stamp.write_text(want)
     return py
 
 
 def main() -> int:
+    """Run yt_transcript.py (or add_summary.py for `add-summary`) inside the venv."""
     args = sys.argv[1:]
     project = find_project()
     py = ensure_venv(project)

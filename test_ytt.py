@@ -1,5 +1,6 @@
 """Offline tests for the ytt package (no network)."""
 
+import re
 from pathlib import Path
 
 import pytest
@@ -326,9 +327,11 @@ def test_rerun_refreshes_existing_siblings(tmp_path, monkeypatch):
     monkeypatch.setattr(fetch, "get_video", lambda *a, **k: data)
     assert yt_transcript.main(["abcdefghijk", "--html", "-d", str(tmp_path), "-q"]) == 0
     html_file = tmp_path / "T.html"
-    html_file.write_text("stale", encoding="utf-8")
+    # An older page of the same video (identifiable, so still ours), with stale content.
+    html_file.write_text(render.render_html(data, [], [], "STALE SUMMARY", tmp_path), encoding="utf-8")
     assert yt_transcript.main(["abcdefghijk", "-d", str(tmp_path), "-q"]) == 0
-    assert html_file.read_text(encoding="utf-8").startswith("<!doctype html>")
+    refreshed = html_file.read_text(encoding="utf-8")
+    assert refreshed.startswith("<!doctype html>") and "STALE SUMMARY" not in refreshed
 
 
 def test_fetch_error_keeps_full_message(tmp_path, monkeypatch, caplog):
@@ -338,3 +341,302 @@ def test_fetch_error_keeps_full_message(tmp_path, monkeypatch, caplog):
     with caplog.at_level("ERROR", logger="yt_transcript"):
         assert yt_transcript.main(["abcdefghijk", "-d", str(tmp_path), "-q"]) == 1
     assert "blocking requests from your IP" in caplog.text
+
+
+# --------------------------------------------------------------------------- CodeRabbit retro review (PR #4)
+
+import json as _json
+import logging as _logging
+
+import add_summary
+
+
+def test_nested_autolink_inside_link_cannot_inject():
+    h = summary.md_to_html('[a](https://x/<https://evil/" onmouseover="alert(1)>)')
+    assert "onmouseover=\"" not in h
+    assert h.count("<a ") <= 1
+    # Without whitespace both patterns match; the old two-pass code nested an
+    # anchor inside href here. One pass keeps the autolink as plain URL text.
+    assert summary.md_to_html("[a](https://x/<https://evil/>)") == '<p><a href="https://x/&lt;https://evil/&gt;">a</a></p>'
+
+
+def test_link_text_still_gets_emphasis_and_urls_do_not():
+    h = summary.md_to_html("[**bold**](https://x/*a*) and <https://y/z>")
+    assert '<a href="https://x/*a*"><strong>bold</strong></a>' in h
+    assert '<a href="https://y/z">https://y/z</a>' in h
+
+
+@pytest.mark.parametrize("bad", ["inf", "nan", "-5", "-1:00", "1e309"])
+def test_parse_time_rejects_nonfinite_and_negative(bad):
+    with pytest.raises(ValueError):
+        parse_time(bad)
+
+
+def test_other_videos_notes_are_never_overwritten(tmp_path, monkeypatch):
+    a = VideoData("aaaaaaaaaaa", "https://www.youtube.com/watch?v=aaaaaaaaaaa", "Same Title", segments=[seg(0, "First video.")])
+    b = VideoData("bbbbbbbbbbb", "https://www.youtube.com/watch?v=bbbbbbbbbbb", "Same Title", segments=[seg(0, "Second video.")])
+    monkeypatch.setattr(fetch, "get_video", lambda vid, *a_, **k: a if vid == "aaaaaaaaaaa" else b)
+    assert yt_transcript.main(["aaaaaaaaaaa", "-d", str(tmp_path), "-q"]) == 0
+    assert yt_transcript.main(["bbbbbbbbbbb", "-d", str(tmp_path), "-q"]) == 0
+    assert "First video." in (tmp_path / "Same Title.md").read_text(encoding="utf-8")
+    assert "Second video." in (tmp_path / "Same Title [bbbbbbbbbbb].md").read_text(encoding="utf-8")
+    # Re-running the first video still regenerates its own file in place.
+    assert yt_transcript.main(["aaaaaaaaaaa", "-d", str(tmp_path), "-q"]) == 0
+    assert not (tmp_path / "Same Title [aaaaaaaaaaa].md").exists()
+
+
+def test_inject_is_all_or_nothing(tmp_path):
+    data, paras = _sample()
+    md = tmp_path / "n.md"
+    md.write_text(render.render_md(data, paras, [], "auto"), encoding="utf-8")
+    md.with_suffix(".html").write_text("<html>no markers</html>", encoding="utf-8")
+    before = md.read_text(encoding="utf-8")
+    with pytest.raises(ValueError):
+        summary.inject(md, "New summary")
+    assert md.read_text(encoding="utf-8") == before
+
+
+def test_inject_skips_txt_without_markers(tmp_path, caplog):
+    data, paras = _sample()
+    md = tmp_path / "n.md"
+    md.write_text(render.render_md(data, paras, [], "auto"), encoding="utf-8")
+    md.with_suffix(".txt").write_text("plain text, no markers", encoding="utf-8")
+    with caplog.at_level("WARNING", logger="yt_transcript"):
+        changed = summary.inject(md, "New summary")
+    assert changed == [md] and "Skipped n.txt" in caplog.text
+
+
+def test_add_summary_refuses_corrupt_json_before_changing_anything(tmp_path):
+    data, paras = _sample()
+    md = tmp_path / "n.md"
+    md.write_text(render.render_md(data, paras, [], "auto"), encoding="utf-8")
+    md.with_suffix(".json").write_text("{not json", encoding="utf-8")
+    s = tmp_path / "s.md"
+    s.write_text("Written summary", encoding="utf-8")
+    before = md.read_text(encoding="utf-8")
+    assert add_summary.main([str(md), str(s)]) == 1
+    assert md.read_text(encoding="utf-8") == before
+
+
+def test_add_summary_updates_json(tmp_path):
+    data, paras = _sample()
+    md = tmp_path / "n.md"
+    md.write_text(render.render_md(data, paras, [], "auto"), encoding="utf-8")
+    md.with_suffix(".json").write_text(render.render_json(data, paras, [], "auto"), encoding="utf-8")
+    s = tmp_path / "s.md"
+    s.write_text("Written summary", encoding="utf-8")
+    assert add_summary.main([str(md), str(s)]) == 0
+    assert _json.loads(md.with_suffix(".json").read_text(encoding="utf-8"))["summary_md"] == "Written summary"
+    assert not list(tmp_path.glob("*.tmp"))
+
+
+def test_setup_logging_does_not_stack_handlers():
+    caller = _logging.NullHandler()
+    saved_level = yt_transcript.log.level
+    yt_transcript.log.addHandler(caller)
+    try:
+        yt_transcript.setup_logging(False, True)
+        n = len(yt_transcript.log.handlers)
+        yt_transcript.setup_logging(False, True)
+        assert len(yt_transcript.log.handlers) == n
+        assert caller in yt_transcript.log.handlers
+    finally:
+        for h in [h for h in yt_transcript.log.handlers if getattr(h, "_ytt_owned", False)]:
+            yt_transcript.log.removeHandler(h)
+            h.close()
+        yt_transcript.log.removeHandler(caller)
+        yt_transcript.log.setLevel(saved_level)
+
+
+def test_undecodable_note_is_an_ownership_conflict(tmp_path):
+    md = tmp_path / "x.md"
+    md.write_bytes(b"\xff\xfe\x00 not utf-8 v=abcdefghijk")
+    assert yt_transcript._same_video(md, "abcdefghijk") is False
+
+
+def test_leftover_siblings_without_md_count_as_taken(tmp_path):
+    (tmp_path / "T_files").mkdir()
+    assert yt_transcript._name_taken(tmp_path, "T", "abcdefghijk") is True
+    assert yt_transcript._name_taken(tmp_path, "V", "abcdefghijk") is False
+
+
+def test_sibling_ownership_comes_from_metadata_not_links(tmp_path):
+    data, paras = _sample()  # video abcdefghijk
+    other = VideoData("zzzzzzzzzzz", "https://www.youtube.com/watch?v=zzzzzzzzzzz", "Other", segments=[seg(0, "x")])
+    # Another video's page whose summary links to abcdefghijk must not be claimed by it.
+    linked = "See [this one](https://www.youtube.com/watch?v=abcdefghijk&t=5s)."
+    plain = [Paragraph(0, 1, "Other video text.")]
+    # Each format on its own, so a regression in either check is caught.
+    (tmp_path / "A.html").write_text(render.render_html(other, plain, [], linked, tmp_path), encoding="utf-8")
+    assert yt_transcript._name_taken(tmp_path, "A", "abcdefghijk") is True
+    (tmp_path / "A2.txt").write_text(render.render_txt(other, plain, [], linked), encoding="utf-8")
+    assert yt_transcript._name_taken(tmp_path, "A2", "abcdefghijk") is True
+    # JSON video_id of the wrong type counts as unknown, not a crash.
+    for i, bad in enumerate(("[]", "{}", "null")):
+        (tmp_path / f"J{i}.json").write_text('{"video_id": %s}' % bad, encoding="utf-8")
+        assert yt_transcript._name_taken(tmp_path, f"J{i}", "abcdefghijk") is True
+    # Siblings whose metadata names this video stay reusable, in every format.
+    (tmp_path / "B.html").write_text(render.render_html(data, paras, [], "s", tmp_path), encoding="utf-8")
+    (tmp_path / "B.txt").write_text(render.render_txt(data, paras, [], "s"), encoding="utf-8")
+    (tmp_path / "B.json").write_text(render.render_json(data, paras, [], "s"), encoding="utf-8")
+    assert yt_transcript._name_taken(tmp_path, "B", "abcdefghijk") is False
+    # Mixed owners: taken.
+    (tmp_path / "B.json").write_text(render.render_json(other, plain, [], "s"), encoding="utf-8")
+    assert yt_transcript._name_taken(tmp_path, "B", "abcdefghijk") is True
+
+
+def test_write_atomic_keeps_permissions_and_follows_symlinks(tmp_path):
+    import os
+    import stat
+    target = tmp_path / "real.md"
+    target.write_text("old", encoding="utf-8")
+    # mkstemp makes 0600 files; group-read (POSIX) proves the mode is copied, not defaulted.
+    os.chmod(target, stat.S_IREAD | stat.S_IWRITE | (stat.S_IRGRP if os.name == "posix" else 0))
+    before = stat.S_IMODE(target.stat().st_mode)
+    summary.write_atomic(target, "new")
+    assert stat.S_IMODE(target.stat().st_mode) == before
+    link = tmp_path / "link.md"
+    try:
+        link.symlink_to(target)
+    except (OSError, NotImplementedError):
+        pytest.skip("symlinks need developer mode or admin on Windows")
+    summary.write_atomic(link, "via link")
+    assert link.is_symlink() and target.read_text(encoding="utf-8") == "via link"
+
+
+def test_add_summary_rejects_non_object_json(tmp_path):
+    data, paras = _sample()
+    md = tmp_path / "n.md"
+    md.write_text(render.render_md(data, paras, [], "auto"), encoding="utf-8")
+    md.with_suffix(".json").write_text("[1, 2]", encoding="utf-8")
+    s = tmp_path / "s.md"
+    s.write_text("Written", encoding="utf-8")
+    before = md.read_text(encoding="utf-8")
+    assert add_summary.main([str(md), str(s)]) == 1
+    assert md.read_text(encoding="utf-8") == before
+
+
+def test_write_atomic_uses_unique_temp_and_cleans_up(tmp_path, monkeypatch):
+    target = tmp_path / "f.md"
+    summary.write_atomic(target, "one")
+    assert target.read_text(encoding="utf-8") == "one"
+
+    def boom(*a, **k):
+        raise OSError("disk full")
+    monkeypatch.setattr(summary.os, "replace", boom)
+    with pytest.raises(OSError):
+        summary.write_atomic(target, "two")
+    assert target.read_text(encoding="utf-8") == "one"
+    assert [p.name for p in tmp_path.iterdir()] == ["f.md"]
+
+
+def test_launcher_refuses_to_delete_a_preexisting_broken_venv(tmp_path, monkeypatch):
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("ytt_run", Path(__file__).parent / ".claude/skills/yt-transcript/scripts/run.py")
+    run = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(run)
+    tag = {"win32": ".venv_windows", "darwin": ".venv_mac"}.get(run.sys.platform, ".venv_linux")
+    broken = tmp_path / tag
+    broken.mkdir()
+    (broken / "keep.txt").write_text("someone's file", encoding="utf-8")
+    with pytest.raises(SystemExit):
+        run.ensure_venv(tmp_path)
+    assert (broken / "keep.txt").exists()
+
+
+def _fake_capture_env(monkeypatch, tmp_path):
+    """Stub out the network and ffmpeg so capture() selection logic runs offline."""
+    monkeypatch.setattr(shots, "ffmpeg_exe", lambda: "ffmpeg")
+    video = tmp_path / "v.mp4"
+    video.write_bytes(b"x")
+    monkeypatch.setattr(shots, "download_video", lambda *a, **k: video)
+    monkeypatch.setattr(shots, "scene_candidates", lambda *a, **k: [])
+    counter = iter(range(10_000))
+
+    def grab(ff, v, t, out, width=1280):
+        out.write_bytes(b"jpg")
+        return True
+
+    monkeypatch.setattr(shots, "grab_frame", grab)
+    # Every frame gets a very different hash, so nothing is deduplicated.
+    monkeypatch.setattr(shots, "dhash", lambda ff, img, size=16: (next(counter) * 0x9E3779B97F4A7C15) % (1 << 256))
+
+
+def test_requested_shots_do_not_use_the_auto_allowance(tmp_path, monkeypatch):
+    _fake_capture_env(monkeypatch, tmp_path)
+    data = VideoData("abcdefghijk", "u", "T", duration=600,
+                     chapters=[Chapter(i * 60, i * 60 + 60, f"C{i}") for i in range(10)])
+    got = shots.capture(data, tmp_path / "a", "a", mode="chapters", extra_times=[5.2, 5.7, 300], limit=3)
+    requested = [s for s in got if "Requested" in s.reasons]
+    assert len(requested) == 2  # 5.2 and 5.7 are one second -> one frame
+    assert len(got) - len(requested) == 3
+
+
+def test_max_shots_zero_keeps_only_requested(tmp_path, monkeypatch):
+    _fake_capture_env(monkeypatch, tmp_path)
+    data = VideoData("abcdefghijk", "u", "T", duration=600,
+                     chapters=[Chapter(i * 60, i * 60 + 60, f"C{i}") for i in range(10)])
+    got = shots.capture(data, tmp_path / "a", "a", mode="auto", extra_times=[42], limit=0)
+    assert [s.time for s in got] == [42]
+
+
+# --------------------------------------------------------------------------- Codex review of the retro fixes
+
+
+def test_emphasis_spanning_a_link_still_works():
+    h = summary.md_to_html("**See [the guide](https://example.com/a*b*) for details**")
+    assert h == '<p><strong>See <a href="https://example.com/a*b*">the guide</a> for details</strong></p>'
+
+
+def test_fallback_name_is_also_ownership_checked(tmp_path, monkeypatch):
+    mk = lambda vid, line: VideoData(vid, f"https://www.youtube.com/watch?v={vid}", "Title", segments=[seg(0, line)])
+    vids = {"aaaaaaaaaaa": mk("aaaaaaaaaaa", "Video A."), "bbbbbbbbbbb": mk("bbbbbbbbbbb", "Video B."),
+            "ccccccccccc": mk("ccccccccccc", "Video C.")}
+    monkeypatch.setattr(fetch, "get_video", lambda vid, *a, **k: vids[vid])
+    assert yt_transcript.main(["aaaaaaaaaaa", "-d", str(tmp_path), "-q"]) == 0
+    # C claims the name B would fall back to.
+    assert yt_transcript.main(["ccccccccccc", "-d", str(tmp_path), "-q", "-o", "Title [bbbbbbbbbbb]"]) == 0
+    assert yt_transcript.main(["bbbbbbbbbbb", "-d", str(tmp_path), "-q"]) == 0
+    assert "Video C." in (tmp_path / "Title [bbbbbbbbbbb].md").read_text(encoding="utf-8")
+    assert "Video B." in (tmp_path / "Title [bbbbbbbbbbb] 2.md").read_text(encoding="utf-8")
+
+
+def test_requested_shot_keeps_its_fractional_time(tmp_path, monkeypatch):
+    _fake_capture_env(monkeypatch, tmp_path)
+    seen = []
+    orig = shots.grab_frame
+    monkeypatch.setattr(shots, "grab_frame", lambda ff, v, t, out, width=1280: (seen.append(t), orig(ff, v, t, out))[1])
+    data = VideoData("abcdefghijk", "u", "T", duration=60)
+    got = shots.capture(data, tmp_path / "a", "a", mode="chapters", extra_times=[12.9, 12.2], limit=0)
+    assert seen == [12.9] and got[0].time == 12.9
+
+
+def test_md_owned_but_sibling_names_another_video_is_taken(tmp_path):
+    data, paras = _sample()  # abcdefghijk
+    other = VideoData("zzzzzzzzzzz", "https://www.youtube.com/watch?v=zzzzzzzzzzz", "Other", segments=[seg(0, "x")])
+    plain = [Paragraph(0, 1, "Other video text.")]
+    (tmp_path / "M.md").write_text(render.render_md(data, paras, [], "s"), encoding="utf-8")
+    assert yt_transcript._name_taken(tmp_path, "M", "abcdefghijk") is False
+    (tmp_path / "M.json").write_text(render.render_json(other, plain, [], "s"), encoding="utf-8")
+    assert yt_transcript._name_taken(tmp_path, "M", "abcdefghijk") is True
+
+
+def test_unknown_sibling_owner_blocks_reuse(tmp_path):
+    data, paras = _sample()
+    (tmp_path / "U.md").write_text(render.render_md(data, paras, [], "s"), encoding="utf-8")
+    (tmp_path / "U.html").write_text("<html>someone's page, no metadata</html>", encoding="utf-8")
+    assert yt_transcript._name_taken(tmp_path, "U", "abcdefghijk") is True
+
+
+def test_pre_v012_html_is_identified_by_its_watch_link(tmp_path):
+    data, paras = _sample()
+    other = VideoData("zzzzzzzzzzz", "https://www.youtube.com/watch?v=zzzzzzzzzzz", "Other", segments=[seg(0, "x")])
+    plain = [Paragraph(0, 1, "Other video text.")]
+    # Simulate an older page: drop the yt-video-id meta tag.
+    old = lambda v, p, s: re.sub(r'<meta name="yt-video-id"[^>]*>\n', "", render.render_html(v, p, [], s, tmp_path))
+    (tmp_path / "L.md").write_text(render.render_md(data, paras, [], "s"), encoding="utf-8")
+    (tmp_path / "L.html").write_text(old(data, paras, "s"), encoding="utf-8")
+    assert yt_transcript._name_taken(tmp_path, "L", "abcdefghijk") is False
+    # An older page for another video, even one whose summary links to ours, is someone else's.
+    (tmp_path / "L.html").write_text(old(other, plain, "[x](https://www.youtube.com/watch?v=abcdefghijk)"), encoding="utf-8")
+    assert yt_transcript._name_taken(tmp_path, "L", "abcdefghijk") is True

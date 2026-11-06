@@ -60,6 +60,7 @@ class _Cue:
 
 
 def clean_caption(text: str) -> str:
+    """Unescape HTML entities and collapse whitespace in one caption line."""
     text = html.unescape(text).replace("\n", " ")
     return _WS_RE.sub(" ", text).strip()
 
@@ -121,6 +122,7 @@ def is_punctuated(words: list[Word]) -> bool:
 
 
 def _ends_sentence(word: str) -> bool:
+    """True when a word ends a sentence (not an abbreviation like 'e.g.')."""
     w = word.lower().rstrip("\"')]")
     if not w or w[-1] not in ".!?":
         return False
@@ -128,10 +130,12 @@ def _ends_sentence(word: str) -> bool:
 
 
 def split_sentences(words: list[Word], punctuated: bool) -> list[Sentence]:
+    """Group timed words into sentences, using punctuation or pauses and cue words."""
     sentences: list[Sentence] = []
     cur: list[Word] = []
 
     def flush() -> None:
+        """Emit the words or sentences collected so far as one unit."""
         if cur:
             sentences.append(Sentence(list(cur)))
             cur.clear()
@@ -159,6 +163,7 @@ def split_sentences(words: list[Word], punctuated: bool) -> list[Sentence]:
 
 
 def _finish_sentence(s: str, add_period: bool) -> str:
+    """Capitalise, fix a lone 'i', and make sure the sentence ends with punctuation."""
     s = s.strip()
     if not s:
         return s
@@ -188,6 +193,7 @@ def restore_punctuation(words: list[Word]) -> bool:
 
 
 def chapter_at(t: float, chapters: list[Chapter]) -> int | None:
+    """Index of the chapter that time t falls in, or None before the first."""
     idx = None
     for i, c in enumerate(chapters):
         # Speech often starts a beat before the chapter marker the creator set.
@@ -230,6 +236,7 @@ def build_paragraphs(
     n_per = max(1, sentences_per_paragraph)
 
     def flush() -> None:
+        """Emit the words or sentences collected so far as one unit."""
         if cur:
             paragraphs.append(
                 Paragraph(
@@ -244,6 +251,7 @@ def build_paragraphs(
     pending_cue: _Cue | None = None
 
     def emit_cue() -> None:
+        """Add the pending sound cue as its own paragraph, skipping repeats."""
         nonlocal pending_cue
         c = pending_cue
         pending_cue = None

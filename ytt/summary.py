@@ -8,13 +8,19 @@ rewrites the Markdown and HTML siblings in place without refetching anything.
 
 from __future__ import annotations
 
+import contextlib
 import html
+import logging
+import tempfile
 import math
+import os
 import re
 from collections import Counter
 from pathlib import Path
 
 from .models import Paragraph
+
+log = logging.getLogger("yt_transcript")
 
 MD_START = "<!-- yt-summary:start -->"
 MD_END = "<!-- yt-summary:end -->"
@@ -50,6 +56,7 @@ def extractive(paragraphs: list[Paragraph], n: int = 5) -> list[tuple[float, str
     total = len(sents)
 
     def score(ws: list[str]) -> float:
+        """TF-IDF weight of a sentence's words, normalised for length."""
         return sum(math.log(1 + tf[w]) * math.log(1 + total / df[w]) for w in set(ws)) / (len(ws) ** 0.5)
 
     ranked = sorted(range(len(sents)), key=lambda i: score(sents[i][2]), reverse=True)
@@ -67,14 +74,40 @@ def extractive(paragraphs: list[Paragraph], n: int = 5) -> list[tuple[float, str
 # --------------------------------------------------------------------------- md -> html (subset)
 
 
-def _inline(s: str) -> str:
-    s = html.escape(s)  # quote=True: link targets end up inside href="..."
+# [text](url) or <url>, matched in ONE pass over the escaped text, so a URL can
+# never be re-scanned after it has been placed inside an href attribute.
+_LINK_RE = re.compile(
+    r"\[(?P<text>[^\]]+)\]\((?P<url>https?://[^)\s]+)\)"
+    r"|&lt;(?P<auto>https?://[^\s&<>]+(?:&amp;[^\s&<>]+)*)&gt;"
+)
+
+
+def _emphasis(s: str) -> str:
+    """Code, bold, italic on already-escaped text (never on URLs)."""
     s = re.sub(r"`([^`]+)`", r"<code>\1</code>", s)
     s = re.sub(r"\*\*([^*]+)\*\*", r"<strong>\1</strong>", s)
-    s = re.sub(r"(?<![*\w])\*([^*\n]+)\*(?![*\w])", r"<em>\1</em>", s)
-    s = re.sub(r"\[([^\]]+)\]\((https?://[^)\s]+)\)", r'<a href="\2">\1</a>', s)
-    s = re.sub(r"&lt;(https?://[^\s&<>]+(?:&amp;[^\s&<>]+)*)&gt;", r'<a href="\1">\1</a>', s)  # <https://...> autolinks
-    return s
+    return re.sub(r"(?<![*\w])\*([^*\n]+)\*(?![*\w])", r"<em>\1</em>", s)
+
+
+def _inline(s: str) -> str:
+    """Inline Markdown (links, code, bold, italic) to escaped HTML."""
+    s = html.escape(s)  # quote=True: a " in a URL becomes &quot; and cannot close href
+    # Swap each link for an inert placeholder, apply emphasis to the whole line
+    # (so **bold [link](url) text** still works), then put the links back.
+    # URLs never pass through the emphasis or autolink patterns.
+    links: list[str] = []
+
+    def stash(m: re.Match) -> str:
+        """Replace one link with a placeholder and remember its HTML."""
+        if m.group("auto"):
+            url = m.group("auto")
+            links.append(f'<a href="{url}">{url}</a>')
+        else:
+            links.append(f'<a href="{m.group("url")}">{_emphasis(m.group("text"))}</a>')
+        return f"\x00{len(links) - 1}\x00"
+
+    s = _emphasis(_LINK_RE.sub(stash, s))
+    return re.sub(r"\x00(\d+)\x00", lambda m: links[int(m.group(1))], s)
 
 
 def md_to_html(md: str) -> str:
@@ -84,11 +117,13 @@ def md_to_html(md: str) -> str:
     para: list[str] = []
 
     def close_para() -> None:
+        """Emit the pending paragraph, if any."""
         if para:
             out.append("<p>" + _inline(" ".join(para)) + "</p>")
             para.clear()
 
     def close_list() -> None:
+        """Close the open list, if any."""
         nonlocal list_tag
         if list_tag:
             out.append(f"</{list_tag}>")
@@ -136,6 +171,7 @@ HTML_END = "<!--yt-summary:end-->"
 
 
 def _replace_between(text: str, start: str, end: str, new: str) -> str:
+    """Replace the text between two markers; ValueError if they are missing."""
     i, j = text.find(start), text.find(end)
     if i < 0 or j < i:
         raise ValueError(f"summary markers {start} ... {end} not found")
@@ -143,22 +179,47 @@ def _replace_between(text: str, start: str, end: str, new: str) -> str:
 
 
 def inject(md_path: Path, summary_md: str) -> list[Path]:
-    """Replace the summary in the .md file and any sibling .html. Returns files changed."""
-    changed = []
+    """Replace the summary in the .md file and its .html / .txt siblings.
+
+    Every replacement is computed before anything is written, so a missing
+    marker in the md or html leaves all files untouched. A .txt without markers
+    is skipped (and reported), not treated as updated. Returns files changed.
+    """
+    planned: list[tuple[Path, str]] = []
     md_text = md_path.read_text(encoding="utf-8")
-    md_path.write_text(_replace_between(md_text, MD_START, MD_END, summary_md), encoding="utf-8")
-    changed.append(md_path)
+    planned.append((md_path, _replace_between(md_text, MD_START, MD_END, summary_md)))
     html_path = md_path.with_suffix(".html")
     if html_path.exists():
         h = html_path.read_text(encoding="utf-8")
-        html_path.write_text(_replace_between(h, HTML_START, HTML_END, md_to_html(summary_md)), encoding="utf-8")
-        changed.append(html_path)
+        planned.append((html_path, _replace_between(h, HTML_START, HTML_END, md_to_html(summary_md))))
     txt_path = md_path.with_suffix(".txt")
     if txt_path.exists():
-        t = txt_path.read_text(encoding="utf-8")
         try:
-            txt_path.write_text(_replace_between(t, "[summary]", "[/summary]", summary_md), encoding="utf-8")
-            changed.append(txt_path)
+            t = txt_path.read_text(encoding="utf-8")
+            planned.append((txt_path, _replace_between(t, "[summary]", "[/summary]", summary_md)))
         except ValueError:
-            pass
-    return changed
+            log.warning("Skipped %s: it has no [summary] markers", txt_path.name)
+    for path, new_text in planned:
+        write_atomic(path, new_text)
+    return [p for p, _ in planned]
+
+
+def write_atomic(path: Path, text: str) -> None:
+    """Write via a unique temp file + rename, so an interrupted write never truncates.
+
+    A symlinked note is followed (the target is updated, the link stays), and
+    an existing file keeps its permission bits.
+    """
+    path = path.resolve()
+    mode = path.stat().st_mode & 0o7777 if path.exists() else None
+    fd, tmp = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=path.parent)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8", newline="") as f:
+            f.write(text)
+        if mode is not None:
+            os.chmod(tmp, mode)
+        os.replace(tmp, path)
+    except BaseException:
+        with contextlib.suppress(OSError):
+            os.unlink(tmp)
+        raise

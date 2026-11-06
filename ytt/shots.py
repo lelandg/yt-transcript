@@ -66,6 +66,7 @@ class Candidate:
 
 def chapter_candidates(chapters: list[Chapter]) -> list[Candidate]:
     # A beat into the chapter, past the transition into it.
+    """One candidate per chapter, a beat after it starts."""
     return [
         Candidate(c.start + min(3.0, max(0.5, (c.end - c.start) / 4)), WEIGHT_CHAPTER, [f"Chapter: {c.title}"])
         for c in chapters
@@ -73,6 +74,7 @@ def chapter_candidates(chapters: list[Chapter]) -> list[Candidate]:
 
 
 def cue_candidates(segments: list[Segment]) -> list[Candidate]:
+    """Candidates where the speaker points at the screen, strongest phrase per caption."""
     out = []
     for seg in segments:
         text = clean_caption(seg.text)
@@ -88,6 +90,7 @@ def cue_candidates(segments: list[Segment]) -> list[Candidate]:
 
 
 def heatmap_candidates(heatmap: list[dict], top: int = 5) -> list[Candidate]:
+    """Candidates at the top 'most replayed' peaks."""
     pts = [h for h in heatmap if isinstance(h, dict) and "start_time" in h]
     if len(pts) < 3:
         return []
@@ -134,6 +137,7 @@ def scene_candidates(ffmpeg: str, video: Path, threshold: float = 0.3) -> list[C
 
 
 def interval_candidates(duration: float, every: float) -> list[Candidate]:
+    """Candidates every `every` seconds."""
     n = int(duration // every)
     return [Candidate(every * (i + 1), 1.0, ["Interval"]) for i in range(n) if every * (i + 1) < duration - 1]
 
@@ -160,6 +164,7 @@ def merge(cands: list[Candidate], window: float = MERGE_WINDOW) -> list[Candidat
 
 
 def select(cands: list[Candidate], limit: int, min_gap: float, duration: float) -> list[Candidate]:
+    """Highest-scoring candidates at least `min_gap` apart, up to `limit`."""
     picked: list[Candidate] = []
     for c in sorted(cands, key=lambda c: c.score, reverse=True):
         if duration and not (0 <= c.time < duration - 0.5):
@@ -180,6 +185,7 @@ def default_limit(duration: float) -> int:
 
 
 def download_video(video_id: str, workdir: Path, max_height: int) -> Path | None:
+    """Download a video-only stream at or below max_height; None on failure."""
     try:
         import yt_dlp
     except ImportError:
@@ -204,6 +210,7 @@ def download_video(video_id: str, workdir: Path, max_height: int) -> Path | None
 
 
 def grab_frame(ffmpeg: str, video: Path, t: float, out: Path, width: int = 1280) -> bool:
+    """Write the frame at time t to `out` as JPEG; False on failure."""
     cmd = [
         ffmpeg, "-hide_banner", "-loglevel", "error", "-y", "-ss", f"{t:.2f}", "-i", str(video),
         "-frames:v", "1", "-vf", f"scale='min({width},iw)':-2", "-q:v", "3", str(out),
@@ -276,26 +283,36 @@ def capture(
         cands += heatmap_candidates(data.heatmap)
     if interval:
         cands += interval_candidates(data.duration, interval)
-    forced = [Candidate(t, 100.0, ["Requested"]) for t in (extra_times or [])]
+    # Frame files are named to the second, so requested times within one second
+    # are one shot. Requested shots never count against the automatic limit.
+    # Keep the first exact time asked for in each second; seek to it as given.
+    by_second: dict[int, float] = {}
+    for t in extra_times or []:
+        by_second.setdefault(int(t), float(t))
+    if extra_times and len(by_second) < len(extra_times):
+        log.info("Requested times within the same second were merged (%d -> %d)", len(extra_times), len(by_second))
+    forced = [Candidate(t, 100.0, ["Requested"]) for _, t in sorted(by_second.items())]
+    if limit <= 0:
+        cands = []  # --max-shots 0: requested frames only
 
     with tempfile.TemporaryDirectory(prefix="ytt-", ignore_cleanup_errors=True) as tmp:
         log.info("Downloading video (<= %dp, video only) for screenshots...", max_height)
         video = download_video(data.video_id, Path(tmp), max_height)
         if not video:
             return []
-        if mode in ("auto", "scenes"):
+        if mode in ("auto", "scenes") and limit > 0:
             log.info("Detecting scene changes...")
             scenes = scene_candidates(ffmpeg, video)
             log.info("  %d scene changes", len(scenes))
             cands += scenes
-        if not cands and not forced:
+        if not cands and not forced and limit > 0:
             log.info("No moments found; falling back to fixed intervals")
             cands = interval_candidates(data.duration, max(30.0, data.duration / limit))
 
         merged = merge(cands)
         # Oversample: some frames will be dropped as duplicates.
-        chosen = forced + select(merged, int(limit * 1.6) + 2, min_gap, data.duration)
-        chosen.sort(key=lambda c: c.score, reverse=True)
+        auto = select(merged, int(limit * 1.6) + 2, min_gap, data.duration) if limit > 0 else []
+        chosen = forced + sorted(auto, key=lambda c: c.score, reverse=True)
 
         assets_dir.mkdir(parents=True, exist_ok=True)
         for old in assets_dir.glob("shot_*.jpg"):
@@ -303,16 +320,17 @@ def capture(
 
         kept: list[tuple[Shot, int | None]] = []
         dropped = 0
+        auto_kept = 0
         for c in chosen:
-            if len(kept) >= limit + len(forced):
-                break
+            is_forced = any(c is f for f in forced)
+            if not is_forced and auto_kept >= limit:
+                break  # forced shots come first in `chosen`, so all of them were handled
             out = assets_dir / shot_filename(c.time)
             if out.exists():
                 continue
             if not grab_frame(ffmpeg, video, c.time, out):
                 continue
             h = dhash(ffmpeg, out)
-            is_forced = c.score >= 100.0
             is_chapter = any(r.startswith("Chapter:") for r in c.reasons)
             limit_bits = int(HASH_SIZE * HASH_SIZE * (DUP_FRACTION_CHAPTER if is_chapter else DUP_FRACTION))
             if h is not None and not is_forced and any(
@@ -322,6 +340,8 @@ def capture(
                 dropped += 1
                 continue
             kept.append((Shot(c.time, f"{rel_prefix}/{out.name}", c.reasons, round(c.score, 2)), h))
+            if not is_forced:
+                auto_kept += 1
         if dropped:
             log.info("  dropped %d near-duplicate frames", dropped)
         if keep_video:

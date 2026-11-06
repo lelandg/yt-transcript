@@ -4,5 +4,9 @@
 # stderr progress lines into terminating errors when output is captured.
 $py = if (Get-Command python3 -ErrorAction SilentlyContinue) { "python3" } else { "python" }
 if ($IsWindows -or $env:OS -eq "Windows_NT") { $py = "python" }
+if (-not (Get-Command $py -ErrorAction SilentlyContinue)) {
+    [Console]::Error.WriteLine("ERROR: Python interpreter '$py' not found on PATH.")
+    exit 1
+}
 & $py (Join-Path $PSScriptRoot "run.py") @args
 exit $LASTEXITCODE
