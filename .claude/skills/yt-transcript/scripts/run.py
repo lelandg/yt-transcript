@@ -41,14 +41,17 @@ CLONE_TO = HOME / "code" / "yt-transcript"
 
 
 def say(msg: str) -> None:
+    """Progress line on stderr, so stdout stays the tool's own output."""
     print(f">>> {msg}", file=sys.stderr, flush=True)
 
 
 def is_project(p: Path) -> bool:
+    """True when the folder is a yt-transcript checkout."""
     return (p / "yt_transcript.py").is_file() and (p / "requirements.txt").is_file()
 
 
 def find_project() -> Path:
+    """Locate the checkout: env var, this file's repo, common paths, else clone it."""
     env = os.environ.get("YT_TRANSCRIPT_PROJECT")
     if env:
         p = Path(env).expanduser()
@@ -73,10 +76,12 @@ def find_project() -> Path:
 
 
 def venv_python(venv: Path) -> Path:
+    """The venv's interpreter path on this OS."""
     return venv / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
 
 
 def ensure_venv(project: Path) -> Path:
+    """Find or create this OS's venv and install requirements when they changed."""
     tag = {"win32": ".venv_windows", "darwin": ".venv_mac"}.get(sys.platform, ".venv_linux")
     for name in (tag, ".venv"):
         py = venv_python(project / name)
@@ -121,6 +126,7 @@ def ensure_venv(project: Path) -> Path:
 
 
 def main() -> int:
+    """Run yt_transcript.py (or add_summary.py for `add-summary`) inside the venv."""
     args = sys.argv[1:]
     project = find_project()
     py = ensure_venv(project)

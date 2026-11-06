@@ -60,6 +60,7 @@ class _Cue:
 
 
 def clean_caption(text: str) -> str:
+    """Unescape HTML entities and collapse whitespace in one caption line."""
     text = html.unescape(text).replace("\n", " ")
     return _WS_RE.sub(" ", text).strip()
 
@@ -128,6 +129,7 @@ def _ends_sentence(word: str) -> bool:
 
 
 def split_sentences(words: list[Word], punctuated: bool) -> list[Sentence]:
+    """Group timed words into sentences, using punctuation or pauses and cue words."""
     sentences: list[Sentence] = []
     cur: list[Word] = []
 
@@ -188,6 +190,7 @@ def restore_punctuation(words: list[Word]) -> bool:
 
 
 def chapter_at(t: float, chapters: list[Chapter]) -> int | None:
+    """Index of the chapter that time t falls in, or None before the first."""
     idx = None
     for i, c in enumerate(chapters):
         # Speech often starts a beat before the chapter marker the creator set.

@@ -39,6 +39,7 @@ log = logging.getLogger("yt_transcript")
 
 
 def setup_logging(verbose: bool, quiet: bool) -> None:
+    """Console logging at the chosen level, plus warnings and errors to the per-user log file."""
     level = logging.DEBUG if verbose else logging.WARNING if quiet else logging.INFO
     for stream in (sys.stdout, sys.stderr):
         try:  # Windows consoles default to a legacy code page; titles are often non-ASCII
@@ -70,6 +71,7 @@ def setup_logging(verbose: bool, quiet: bool) -> None:
 
 
 def build_parser() -> argparse.ArgumentParser:
+    """The command-line interface: outputs, transcript, summary, screenshot, and misc options."""
     p = argparse.ArgumentParser(
         description="Turn a YouTube video into Markdown notes (summary, chapters, timestamped transcript), "
         "optionally with HTML, text, JSON, and screenshots.",
@@ -189,6 +191,7 @@ def _existing_written_summary(md_path: Path, video_id: str) -> str | None:
 
 
 def main(argv: list[str] | None = None) -> int:
+    """Fetch (or load from cache), format, capture screenshots, and write every requested output."""
     args = build_parser().parse_args(argv)
     setup_logging(args.verbose, args.quiet)
     t0 = time.monotonic()

@@ -42,6 +42,7 @@ def layout(data: VideoData, paragraphs: list[Paragraph], shots: list[Shot]) -> l
 
 
 def _meta_bits(data: VideoData) -> list[tuple[str, str]]:
+    """Label/value pairs for the metadata line, skipping unknown fields."""
     bits = []
     if data.channel:
         bits.append(("Channel", data.channel))
@@ -83,6 +84,7 @@ def _md_ts(data: VideoData, t: float) -> str:
 
 
 def summary_block_md(auto: list[tuple[float, str]], data: VideoData, written: str | None) -> str:
+    """The written summary if there is one, else the auto-extracted sentences."""
     if written:
         return written.strip()
     if not auto:
@@ -100,6 +102,7 @@ def render_md(
     *,
     timestamps: bool = True,
 ) -> str:
+    """The Markdown notes: header, summary, chapters, transcript with shots, description."""
     out = [f"# {display_title(data)}", ""]
     meta = " · ".join(f"**{k}:** {v}" for k, v in _meta_bits(data))
     if data.channel and data.channel_url:
@@ -141,6 +144,7 @@ def render_md(
 
 
 def render_txt(data: VideoData, paragraphs: list[Paragraph], shots: list[Shot], summary_md: str, *, timestamps: bool = True) -> str:
+    """Plain-text notes with the same sections as the Markdown."""
     title = display_title(data)
     out = [title, "=" * min(len(title), 80)]
     out.append(" | ".join(f"{k}: {v}" for k, v in _meta_bits(data)))
@@ -167,6 +171,7 @@ def render_txt(data: VideoData, paragraphs: list[Paragraph], shots: list[Shot], 
 
 
 def render_json(data: VideoData, paragraphs: list[Paragraph], shots: list[Shot], summary_md: str) -> str:
+    """Everything as JSON: metadata, segments, paragraphs, shots, and summary."""
     d = data.to_dict()
     d["paragraphs"] = [asdict(p) for p in paragraphs]
     d["shots"] = [asdict(s) for s in shots]
@@ -287,6 +292,7 @@ _JS = """
 
 
 def _img_src(rel: str, base_dir: Path, embed: bool) -> str:
+    """Image path for the HTML, or a data: URI when embedding."""
     if embed:
         p = base_dir / rel
         try:
@@ -311,6 +317,7 @@ def render_html(
     timestamps: bool = True,
     embed_images: bool = False,
 ) -> str:
+    """A standalone HTML page with search, gallery, lightbox, and light/dark themes."""
     e = html.escape
     meta = "".join(
         f"<span><b>{e(k)}:</b> " + (f'<a href="{e(data.channel_url)}">{e(v)}</a>' if k == "Channel" and data.channel_url else e(v)) + "</span>"

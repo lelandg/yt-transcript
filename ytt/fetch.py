@@ -57,11 +57,13 @@ def cache_dir() -> Path:
 
 
 def _cache_path(video_id: str, langs: list[str] | None) -> Path:
+    """Cache file for one video and language choice."""
     suffix = "-" + "_".join(langs) if langs else ""
     return cache_dir() / f"{video_id}{suffix}.json"
 
 
 def load_cached(video_id: str, langs: list[str] | None) -> VideoData | None:
+    """Cached metadata and captions, or None when missing, stale, or unreadable."""
     p = _cache_path(video_id, langs)
     try:
         d = json.loads(p.read_text(encoding="utf-8"))
@@ -74,6 +76,7 @@ def load_cached(video_id: str, langs: list[str] | None) -> VideoData | None:
 
 
 def save_cache(data: VideoData, langs: list[str] | None) -> None:
+    """Store metadata and captions; a failed write only logs a warning."""
     p = _cache_path(data.video_id, langs)
     try:
         p.parent.mkdir(parents=True, exist_ok=True)
@@ -135,6 +138,7 @@ def fetch_metadata(video_id: str) -> dict:
 
 
 def _oembed(video_id: str) -> dict:
+    """Title, channel, and thumbnail from YouTube's oEmbed endpoint (no yt-dlp needed)."""
     url = f"https://www.youtube.com/oembed?url={watch_url(video_id)}&format=json"
     req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
     try:
@@ -161,6 +165,7 @@ def _fix_mojibake(s: str) -> str:
 
 
 def _chapters(info: dict) -> list[Chapter]:
+    """Chapters from yt-dlp metadata, skipping malformed entries."""
     out = []
     for c in info.get("chapters") or []:
         try:

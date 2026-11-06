@@ -66,6 +66,7 @@ class Candidate:
 
 def chapter_candidates(chapters: list[Chapter]) -> list[Candidate]:
     # A beat into the chapter, past the transition into it.
+    """One candidate per chapter, a beat after it starts."""
     return [
         Candidate(c.start + min(3.0, max(0.5, (c.end - c.start) / 4)), WEIGHT_CHAPTER, [f"Chapter: {c.title}"])
         for c in chapters
@@ -73,6 +74,7 @@ def chapter_candidates(chapters: list[Chapter]) -> list[Candidate]:
 
 
 def cue_candidates(segments: list[Segment]) -> list[Candidate]:
+    """Candidates where the speaker points at the screen, strongest phrase per caption."""
     out = []
     for seg in segments:
         text = clean_caption(seg.text)
@@ -88,6 +90,7 @@ def cue_candidates(segments: list[Segment]) -> list[Candidate]:
 
 
 def heatmap_candidates(heatmap: list[dict], top: int = 5) -> list[Candidate]:
+    """Candidates at the top 'most replayed' peaks."""
     pts = [h for h in heatmap if isinstance(h, dict) and "start_time" in h]
     if len(pts) < 3:
         return []
@@ -134,6 +137,7 @@ def scene_candidates(ffmpeg: str, video: Path, threshold: float = 0.3) -> list[C
 
 
 def interval_candidates(duration: float, every: float) -> list[Candidate]:
+    """Candidates every `every` seconds."""
     n = int(duration // every)
     return [Candidate(every * (i + 1), 1.0, ["Interval"]) for i in range(n) if every * (i + 1) < duration - 1]
 
@@ -160,6 +164,7 @@ def merge(cands: list[Candidate], window: float = MERGE_WINDOW) -> list[Candidat
 
 
 def select(cands: list[Candidate], limit: int, min_gap: float, duration: float) -> list[Candidate]:
+    """Highest-scoring candidates at least `min_gap` apart, up to `limit`."""
     picked: list[Candidate] = []
     for c in sorted(cands, key=lambda c: c.score, reverse=True):
         if duration and not (0 <= c.time < duration - 0.5):
@@ -180,6 +185,7 @@ def default_limit(duration: float) -> int:
 
 
 def download_video(video_id: str, workdir: Path, max_height: int) -> Path | None:
+    """Download a video-only stream at or below max_height; None on failure."""
     try:
         import yt_dlp
     except ImportError:
@@ -204,6 +210,7 @@ def download_video(video_id: str, workdir: Path, max_height: int) -> Path | None
 
 
 def grab_frame(ffmpeg: str, video: Path, t: float, out: Path, width: int = 1280) -> bool:
+    """Write the frame at time t to `out` as JPEG; False on failure."""
     cmd = [
         ffmpeg, "-hide_banner", "-loglevel", "error", "-y", "-ss", f"{t:.2f}", "-i", str(video),
         "-frames:v", "1", "-vf", f"scale='min({width},iw)':-2", "-q:v", "3", str(out),

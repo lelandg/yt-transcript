@@ -21,6 +21,7 @@ from ytt.summary import inject, write_atomic
 
 
 def main(argv: list[str] | None = None) -> int:
+    """Validate the inputs, then replace the summary in the notes and every sibling format."""
     p = argparse.ArgumentParser(description=__doc__.splitlines()[1])
     p.add_argument("notes", help="The .md file yt_transcript.py wrote")
     p.add_argument("summary", help="Markdown summary file, or - for stdin")

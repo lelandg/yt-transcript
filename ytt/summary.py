@@ -89,6 +89,7 @@ def _emphasis(s: str) -> str:
 
 
 def _inline(s: str) -> str:
+    """Inline Markdown (links, code, bold, italic) to escaped HTML."""
     s = html.escape(s)  # quote=True: a " in a URL becomes &quot; and cannot close href
     # Swap each link for an inert placeholder, apply emphasis to the whole line
     # (so **bold [link](url) text** still works), then put the links back.
@@ -166,6 +167,7 @@ HTML_END = "<!--yt-summary:end-->"
 
 
 def _replace_between(text: str, start: str, end: str, new: str) -> str:
+    """Replace the text between two markers; ValueError if they are missing."""
     i, j = text.find(start), text.find(end)
     if i < 0 or j < i:
         raise ValueError(f"summary markers {start} ... {end} not found")
