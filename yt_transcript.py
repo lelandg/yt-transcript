@@ -25,6 +25,7 @@ this tool's own Notes folder. See ytt/paths.py.
 from __future__ import annotations
 
 import argparse
+import json
 import logging
 import re
 import sys
@@ -133,8 +134,9 @@ def _name_taken(out_dir: Path, stem: str, video_id: str) -> bool:
     """True when files under this name exist and are not this video's.
 
     With the .md present, its header decides. Without it, leftover siblings
-    (.html/.txt/.json or the _files folder) still count as taken unless one of
-    them names this video, so a missing .md never lets us overwrite them.
+    (.html/.txt/.json or the _files folder) count as taken unless their own
+    metadata names this video and none names another. Links inside a summary
+    or description never count: only each format's metadata is read.
     """
     md = out_dir / f"{stem}.md"
     if md.exists():
@@ -143,13 +145,28 @@ def _name_taken(out_dir: Path, stem: str, video_id: str) -> bool:
     present = [p for p in siblings if p.exists()]
     if not present and not (out_dir / f"{stem}_files").exists():
         return False
-    for p in present:
+    owners = {_sibling_video_id(p) for p in present}
+    return owners != {video_id}
+
+
+def _sibling_video_id(path: Path) -> str | None:
+    """The video id recorded in a sibling's metadata, or None if unknown."""
+    try:
+        text = path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
+        return None
+    if path.suffix == ".json":
         try:
-            if f"v={video_id}" in p.read_text(encoding="utf-8"):
-                return False
-        except (OSError, UnicodeDecodeError):
-            continue
-    return True
+            d = json.loads(text)
+        except ValueError:
+            return None
+        return d.get("video_id") if isinstance(d, dict) else None
+    if path.suffix == ".html":
+        m = re.search(r'<meta name="yt-video-id" content="([A-Za-z0-9_-]{11})">', text.split("</head>", 1)[0])
+        return m.group(1) if m else None
+    # .txt: the header (title, metadata line, URL) ends where [summary] starts.
+    m = re.search(r"watch\?v=([A-Za-z0-9_-]{11})", text.split("[summary]", 1)[0])
+    return m.group(1) if m else None
 
 
 def _existing_written_summary(md_path: Path, video_id: str) -> str | None:

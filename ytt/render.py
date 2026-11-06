@@ -375,6 +375,7 @@ def render_html(
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="color-scheme" content="light dark">
+<meta name="yt-video-id" content="{e(data.video_id)}">
 <title>{e(display_title(data))}</title>
 <style>{_CSS}</style>
 </head>

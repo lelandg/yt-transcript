@@ -454,9 +454,44 @@ def test_undecodable_note_is_an_ownership_conflict(tmp_path):
 def test_leftover_siblings_without_md_count_as_taken(tmp_path):
     (tmp_path / "T_files").mkdir()
     assert yt_transcript._name_taken(tmp_path, "T", "abcdefghijk") is True
-    (tmp_path / "U.html").write_text("... watch?v=abcdefghijk ...", encoding="utf-8")
-    assert yt_transcript._name_taken(tmp_path, "U", "abcdefghijk") is False
     assert yt_transcript._name_taken(tmp_path, "V", "abcdefghijk") is False
+
+
+def test_sibling_ownership_comes_from_metadata_not_links(tmp_path):
+    data, paras = _sample()  # video abcdefghijk
+    other = VideoData("zzzzzzzzzzz", "https://www.youtube.com/watch?v=zzzzzzzzzzz", "Other", segments=[seg(0, "x")])
+    # Another video's page whose summary links to abcdefghijk must not be claimed by it.
+    linked = "See [this one](https://www.youtube.com/watch?v=abcdefghijk&t=5s)."
+    plain = [Paragraph(0, 1, "Other video text.")]
+    (tmp_path / "A.html").write_text(render.render_html(other, plain, [], linked, tmp_path), encoding="utf-8")
+    (tmp_path / "A.txt").write_text(render.render_txt(other, plain, [], linked), encoding="utf-8")
+    assert yt_transcript._name_taken(tmp_path, "A", "abcdefghijk") is True
+    # Siblings whose metadata names this video stay reusable, in every format.
+    (tmp_path / "B.html").write_text(render.render_html(data, paras, [], "s", tmp_path), encoding="utf-8")
+    (tmp_path / "B.txt").write_text(render.render_txt(data, paras, [], "s"), encoding="utf-8")
+    (tmp_path / "B.json").write_text(render.render_json(data, paras, [], "s"), encoding="utf-8")
+    assert yt_transcript._name_taken(tmp_path, "B", "abcdefghijk") is False
+    # Mixed owners: taken.
+    (tmp_path / "B.json").write_text(render.render_json(other, plain, [], "s"), encoding="utf-8")
+    assert yt_transcript._name_taken(tmp_path, "B", "abcdefghijk") is True
+
+
+def test_write_atomic_keeps_permissions_and_follows_symlinks(tmp_path):
+    import os
+    import stat
+    target = tmp_path / "real.md"
+    target.write_text("old", encoding="utf-8")
+    os.chmod(target, stat.S_IREAD | stat.S_IWRITE)
+    before = stat.S_IMODE(target.stat().st_mode)
+    summary.write_atomic(target, "new")
+    assert stat.S_IMODE(target.stat().st_mode) == before
+    link = tmp_path / "link.md"
+    try:
+        link.symlink_to(target)
+    except (OSError, NotImplementedError):
+        pytest.skip("symlinks need developer mode or admin on Windows")
+    summary.write_atomic(link, "via link")
+    assert link.is_symlink() and target.read_text(encoding="utf-8") == "via link"
 
 
 def test_add_summary_rejects_non_object_json(tmp_path):

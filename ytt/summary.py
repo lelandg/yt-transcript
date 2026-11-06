@@ -199,11 +199,19 @@ def inject(md_path: Path, summary_md: str) -> list[Path]:
 
 
 def write_atomic(path: Path, text: str) -> None:
-    """Write via a unique temp file + rename, so an interrupted write never truncates."""
+    """Write via a unique temp file + rename, so an interrupted write never truncates.
+
+    A symlinked note is followed (the target is updated, the link stays), and
+    an existing file keeps its permission bits.
+    """
+    path = path.resolve()
+    mode = path.stat().st_mode & 0o7777 if path.exists() else None
     fd, tmp = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=path.parent)
     try:
         with os.fdopen(fd, "w", encoding="utf-8", newline="") as f:
             f.write(text)
+        if mode is not None:
+            os.chmod(tmp, mode)
         os.replace(tmp, path)
     except BaseException:
         with contextlib.suppress(OSError):
