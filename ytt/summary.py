@@ -88,18 +88,21 @@ def _emphasis(s: str) -> str:
 
 def _inline(s: str) -> str:
     s = html.escape(s)  # quote=True: a " in a URL becomes &quot; and cannot close href
-    out: list[str] = []
-    pos = 0
-    for m in _LINK_RE.finditer(s):
-        out.append(_emphasis(s[pos : m.start()]))
+    # Swap each link for an inert placeholder, apply emphasis to the whole line
+    # (so **bold [link](url) text** still works), then put the links back.
+    # URLs never pass through the emphasis or autolink patterns.
+    links: list[str] = []
+
+    def stash(m: re.Match) -> str:
         if m.group("auto"):
             url = m.group("auto")
-            out.append(f'<a href="{url}">{url}</a>')
+            links.append(f'<a href="{url}">{url}</a>')
         else:
-            out.append(f'<a href="{m.group("url")}">{_emphasis(m.group("text"))}</a>')
-        pos = m.end()
-    out.append(_emphasis(s[pos:]))
-    return "".join(out)
+            links.append(f'<a href="{m.group("url")}">{_emphasis(m.group("text"))}</a>')
+        return f"\x00{len(links) - 1}\x00"
+
+    s = _emphasis(_LINK_RE.sub(stash, s))
+    return re.sub(r"\x00(\d+)\x00", lambda m: links[int(m.group(1))], s)
 
 
 def md_to_html(md: str) -> str:

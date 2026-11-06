@@ -196,10 +196,14 @@ def main(argv: list[str] | None = None) -> int:
     md_path = out_dir / f"{stem}.md"
     if md_path.exists() and not _same_video(md_path, data.video_id):
         # Another video already owns this name (same title, or a reused -o):
-        # never overwrite its notes or delete its screenshots.
-        stem = f"{stem} [{data.video_id}]"
-        md_path = out_dir / f"{stem}.md"
-        log.warning("%s.md belongs to another video; writing %s.md instead", md_path.stem.rsplit(" [", 1)[0], stem)
+        # never overwrite its notes or delete its screenshots. Every fallback
+        # name is checked the same way, since it can be taken too.
+        base, n = stem, 1
+        while md_path.exists() and not _same_video(md_path, data.video_id):
+            stem = f"{base} [{data.video_id}]" + (f" {n}" if n > 1 else "")
+            md_path = out_dir / f"{stem}.md"
+            n += 1
+        log.warning("%s.md belongs to another video; writing %s.md instead", base, stem)
     log.info("Output folder: %s (%s)", out_dir, why)
 
     # Screenshots

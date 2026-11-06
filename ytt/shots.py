@@ -278,10 +278,13 @@ def capture(
         cands += interval_candidates(data.duration, interval)
     # Frame files are named to the second, so requested times within one second
     # are one shot. Requested shots never count against the automatic limit.
-    seconds = sorted({int(t) for t in (extra_times or [])})
-    if extra_times and len(seconds) < len(extra_times):
-        log.info("Requested times within the same second were merged (%d -> %d)", len(extra_times), len(seconds))
-    forced = [Candidate(float(t), 100.0, ["Requested"]) for t in seconds]
+    # Keep the first exact time asked for in each second; seek to it as given.
+    by_second: dict[int, float] = {}
+    for t in extra_times or []:
+        by_second.setdefault(int(t), float(t))
+    if extra_times and len(by_second) < len(extra_times):
+        log.info("Requested times within the same second were merged (%d -> %d)", len(extra_times), len(by_second))
+    forced = [Candidate(t, 100.0, ["Requested"]) for _, t in sorted(by_second.items())]
     if limit <= 0:
         cands = []  # --max-shots 0: requested frames only
 

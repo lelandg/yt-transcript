@@ -471,3 +471,34 @@ def test_max_shots_zero_keeps_only_requested(tmp_path, monkeypatch):
                      chapters=[Chapter(i * 60, i * 60 + 60, f"C{i}") for i in range(10)])
     got = shots.capture(data, tmp_path / "a", "a", mode="auto", extra_times=[42], limit=0)
     assert [s.time for s in got] == [42]
+
+
+# --------------------------------------------------------------------------- Codex review of the retro fixes
+
+
+def test_emphasis_spanning_a_link_still_works():
+    h = summary.md_to_html("**See [the guide](https://example.com/a*b*) for details**")
+    assert h == '<p><strong>See <a href="https://example.com/a*b*">the guide</a> for details</strong></p>'
+
+
+def test_fallback_name_is_also_ownership_checked(tmp_path, monkeypatch):
+    mk = lambda vid, line: VideoData(vid, f"https://www.youtube.com/watch?v={vid}", "Title", segments=[seg(0, line)])
+    vids = {"aaaaaaaaaaa": mk("aaaaaaaaaaa", "Video A."), "bbbbbbbbbbb": mk("bbbbbbbbbbb", "Video B."),
+            "ccccccccccc": mk("ccccccccccc", "Video C.")}
+    monkeypatch.setattr(fetch, "get_video", lambda vid, *a, **k: vids[vid])
+    assert yt_transcript.main(["aaaaaaaaaaa", "-d", str(tmp_path), "-q"]) == 0
+    # C claims the name B would fall back to.
+    assert yt_transcript.main(["ccccccccccc", "-d", str(tmp_path), "-q", "-o", "Title [bbbbbbbbbbb]"]) == 0
+    assert yt_transcript.main(["bbbbbbbbbbb", "-d", str(tmp_path), "-q"]) == 0
+    assert "Video C." in (tmp_path / "Title [bbbbbbbbbbb].md").read_text(encoding="utf-8")
+    assert "Video B." in (tmp_path / "Title [bbbbbbbbbbb] 2.md").read_text(encoding="utf-8")
+
+
+def test_requested_shot_keeps_its_fractional_time(tmp_path, monkeypatch):
+    _fake_capture_env(monkeypatch, tmp_path)
+    seen = []
+    orig = shots.grab_frame
+    monkeypatch.setattr(shots, "grab_frame", lambda ff, v, t, out, width=1280: (seen.append(t), orig(ff, v, t, out))[1])
+    data = VideoData("abcdefghijk", "u", "T", duration=60)
+    got = shots.capture(data, tmp_path / "a", "a", mode="chapters", extra_times=[12.9, 12.2], limit=0)
+    assert seen == [12.9] and got[0].time == 12.9
