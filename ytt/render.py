@@ -1,0 +1,378 @@
+"""Write the notes: Markdown (always), and optionally HTML, plain text, JSON."""
+
+from __future__ import annotations
+
+import base64
+import html
+import json
+import re
+import urllib.parse
+from dataclasses import asdict
+from datetime import datetime
+from pathlib import Path
+
+from .models import Paragraph, Shot, VideoData, fmt_time, watch_url
+from .summary import HTML_END, HTML_START, MD_END, MD_START, md_to_html
+
+AUTO_SUMMARY_NOTE = "Auto-extracted key sentences. Replace with a written summary: `add_summary.py`."
+
+
+# --------------------------------------------------------------------------- layout
+
+
+def layout(data: VideoData, paragraphs: list[Paragraph], shots: list[Shot]) -> list[tuple[str, object]]:
+    """Ordered blocks: ("chapter", index) / ("shot", Shot) / ("para", Paragraph)."""
+    blocks: list[tuple[str, object]] = []
+    pending = sorted(shots, key=lambda s: s.time)
+    next_chapter = 0
+    for i, p in enumerate(paragraphs):
+        if p.chapter is not None:
+            while next_chapter <= p.chapter:
+                blocks.append(("chapter", next_chapter))
+                next_chapter += 1
+        nxt = paragraphs[i + 1].start if i + 1 < len(paragraphs) else float("inf")
+        while pending and pending[0].time < nxt:
+            blocks.append(("shot", pending.pop(0)))
+        blocks.append(("para", p))
+    while next_chapter < len(data.chapters):
+        blocks.append(("chapter", next_chapter))
+        next_chapter += 1
+    blocks += [("shot", s) for s in pending]
+    return blocks
+
+
+def _meta_bits(data: VideoData) -> list[tuple[str, str]]:
+    bits = []
+    if data.channel:
+        bits.append(("Channel", data.channel))
+    if data.upload_date:
+        bits.append(("Published", data.upload_date))
+    if data.duration:
+        bits.append(("Length", fmt_time(data.duration)))
+    if data.view_count is not None:
+        bits.append(("Views", f"{data.view_count:,}"))
+    if data.language:
+        kind = " (auto-generated)" if data.is_generated and "auto" not in data.language.lower() else ""
+        bits.append(("Captions", f"{data.language}{kind}"))
+    return bits
+
+
+def display_title(data: VideoData) -> str:
+    """The title without the trailing #hashtags YouTube titles often carry."""
+    t = re.sub(r"(\s+#[\w-]+)+\s*$", "", data.title).strip()
+    return t or data.title
+
+
+def _shot_caption(s: Shot) -> str:
+    return " · ".join(s.reasons) if s.reasons else "Screenshot"
+
+
+def _quote_path(rel: str) -> str:
+    return urllib.parse.quote(rel, safe="/")
+
+
+def _now() -> str:
+    return datetime.now().strftime("%Y-%m-%d %H:%M")
+
+
+# --------------------------------------------------------------------------- markdown
+
+
+def _md_ts(data: VideoData, t: float) -> str:
+    return f"[{fmt_time(t)}]({watch_url(data.video_id, t)})"
+
+
+def summary_block_md(auto: list[tuple[float, str]], data: VideoData, written: str | None) -> str:
+    if written:
+        return written.strip()
+    if not auto:
+        return "_No summary yet._"
+    lines = [f"_{AUTO_SUMMARY_NOTE}_", ""]
+    lines += [f"- {_md_ts(data, t)} {s}" for t, s in auto]
+    return "\n".join(lines)
+
+
+def render_md(
+    data: VideoData,
+    paragraphs: list[Paragraph],
+    shots: list[Shot],
+    summary_md: str,
+    *,
+    timestamps: bool = True,
+) -> str:
+    out = [f"# {display_title(data)}", ""]
+    meta = " · ".join(f"**{k}:** {v}" for k, v in _meta_bits(data))
+    if data.channel and data.channel_url:
+        meta = meta.replace(f"**Channel:** {data.channel}", f"**Channel:** [{data.channel}]({data.channel_url})", 1)
+    out += [f"> {meta}  ", f"> **Video:** <{data.url}> · **Saved:** {_now()}", ""]
+
+    out += ["## Summary", "", MD_START, summary_md.strip(), MD_END, ""]
+
+    if data.chapters:
+        out += ["## Chapters", ""]
+        out += [f"- {_md_ts(data, c.start)} {c.title}" for c in data.chapters]
+        out.append("")
+
+    out += ["## Transcript", ""]
+    for kind, obj in layout(data, paragraphs, shots):
+        if kind == "chapter":
+            c = data.chapters[obj]  # type: ignore[index]
+            out += [f"### {fmt_time(c.start)} · {c.title}", ""]
+        elif kind == "shot":
+            s: Shot = obj  # type: ignore[assignment]
+            out += [
+                f"![{fmt_time(s.time)} {_shot_caption(s).replace('[', '(').replace(']', ')')}]({_quote_path(s.file)})",
+                f"*{_md_ts(data, s.time)} · {_shot_caption(s)}*",
+                "",
+            ]
+        else:
+            p: Paragraph = obj  # type: ignore[assignment]
+            text = f"*{p.text}*" if p.is_cue else p.text
+            out += [f"{_md_ts(data, p.start)} {text}" if timestamps else text, ""]
+
+    if data.description.strip():
+        out += ["## Video description", "", "<details><summary>Show description</summary>", "", "```text",
+                data.description.strip().replace("```", "'''"), "```", "", "</details>", ""]
+    out += ["---", f"*Notes generated by yt-transcript from YouTube captions. Timestamps link to that moment in the video.*", ""]
+    return "\n".join(out)
+
+
+# --------------------------------------------------------------------------- plain text
+
+
+def render_txt(data: VideoData, paragraphs: list[Paragraph], shots: list[Shot], summary_md: str, *, timestamps: bool = True) -> str:
+    title = display_title(data)
+    out = [title, "=" * min(len(title), 80)]
+    out.append(" | ".join(f"{k}: {v}" for k, v in _meta_bits(data)))
+    out += [data.url, "", "[summary]", summary_md.strip(), "[/summary]", ""]
+    if data.chapters:
+        out.append("CHAPTERS")
+        out += [f"  {fmt_time(c.start):>8}  {c.title}" for c in data.chapters]
+        out.append("")
+    out += ["TRANSCRIPT", ""]
+    for kind, obj in layout(data, paragraphs, shots):
+        if kind == "chapter":
+            c = data.chapters[obj]  # type: ignore[index]
+            out += [f"== {fmt_time(c.start)} {c.title} ==", ""]
+        elif kind == "shot":
+            s: Shot = obj  # type: ignore[assignment]
+            out += [f"[screenshot {fmt_time(s.time)}: {s.file}]", ""]
+        else:
+            p: Paragraph = obj  # type: ignore[assignment]
+            out += [f"[{fmt_time(p.start)}] {p.text}" if timestamps else p.text, ""]
+    return "\n".join(out)
+
+
+# --------------------------------------------------------------------------- json
+
+
+def render_json(data: VideoData, paragraphs: list[Paragraph], shots: list[Shot], summary_md: str) -> str:
+    d = data.to_dict()
+    d["paragraphs"] = [asdict(p) for p in paragraphs]
+    d["shots"] = [asdict(s) for s in shots]
+    d["summary_md"] = summary_md
+    d["generated"] = _now()
+    return json.dumps(d, ensure_ascii=False, indent=1)
+
+
+# --------------------------------------------------------------------------- html
+
+_CSS = """
+:root{--bg:#fbfaf7;--fg:#1d1d1b;--muted:#6b6862;--line:#e4e0d8;--card:#fff;--accent:#b4441f;--mark:#ffe58a;--code:#f2efe8}
+@media (prefers-color-scheme:dark){:root:not([data-theme=light]){--bg:#151514;--fg:#e9e6df;--muted:#a19d94;--line:#2f2e2b;--card:#1d1c1a;--accent:#f08a5d;--mark:#6b5a14;--code:#262522}}
+:root[data-theme=dark]{--bg:#151514;--fg:#e9e6df;--muted:#a19d94;--line:#2f2e2b;--card:#1d1c1a;--accent:#f08a5d;--mark:#6b5a14;--code:#262522}
+*{box-sizing:border-box}
+html{-webkit-text-size-adjust:100%}
+body{margin:0;background:var(--bg);color:var(--fg);font:17px/1.65 Charter,"Bitstream Charter","Sitka Text",Cambria,Georgia,serif}
+.wrap{max-width:46rem;margin:0 auto;padding:0 16px 4rem}
+header.top{position:sticky;top:0;z-index:5;background:color-mix(in srgb,var(--bg) 92%,transparent);backdrop-filter:blur(6px);border-bottom:1px solid var(--line)}
+header.top .wrap{display:flex;gap:.75rem;align-items:center;padding-top:.5rem;padding-bottom:.5rem;flex-wrap:wrap}
+header.top nav{display:flex;gap:.9rem;font:600 .85rem/1.2 system-ui,sans-serif;flex-wrap:wrap}
+header.top nav a{color:var(--muted);text-decoration:none}
+header.top nav a:hover{color:var(--accent)}
+#q{flex:1 1 10rem;min-width:8rem;font:15px system-ui,sans-serif;padding:.4rem .6rem;border:1px solid var(--line);border-radius:6px;background:var(--card);color:var(--fg)}
+#hits{font:12px system-ui,sans-serif;color:var(--muted);min-width:4.5rem}
+h1{font-size:clamp(1.6rem,4vw,2.3rem);line-height:1.2;margin:2rem 0 .6rem;letter-spacing:-.01em}
+h2{font:700 1.05rem/1.3 system-ui,sans-serif;text-transform:uppercase;letter-spacing:.06em;color:var(--muted);margin:2.6rem 0 .8rem;padding-bottom:.35rem;border-bottom:1px solid var(--line)}
+h3{font:700 1.15rem/1.3 system-ui,sans-serif;margin:2.2rem 0 .6rem}
+h3 .ts{font-weight:600}
+.meta{font:14px/1.6 system-ui,sans-serif;color:var(--muted);display:flex;flex-wrap:wrap;gap:.2rem 1rem;margin-bottom:1rem}
+.meta b{color:var(--fg);font-weight:600}
+.hero{display:block;width:100%;height:auto;max-height:60vh;aspect-ratio:16/9;object-fit:contain;background:#000;border-radius:8px;margin:1rem 0}
+h2,h3{scroll-margin-top:5.5rem}
+a{color:var(--accent)}
+a.ts{font:600 .78rem/1 ui-monospace,SFMono-Regular,Consolas,monospace;text-decoration:none;background:var(--code);color:var(--accent);padding:.2em .45em;border-radius:4px;margin-right:.5em;vertical-align:.1em;white-space:nowrap}
+a.ts:hover{text-decoration:underline}
+.summary{background:var(--card);border:1px solid var(--line);border-left:4px solid var(--accent);border-radius:8px;padding:.4rem 1.2rem}
+.summary h3,.summary h4,.summary h5{font:700 1rem/1.3 system-ui,sans-serif;margin:1rem 0 .3rem}
+.summary li{margin:.25rem 0}
+code{background:var(--code);padding:.1em .3em;border-radius:3px;font-size:.88em}
+ol.chapters{list-style:none;padding:0;margin:0;columns:2 16rem;column-gap:2rem}
+ol.chapters li{break-inside:avoid;padding:.15rem 0}
+.gallery{display:grid;grid-template-columns:repeat(auto-fill,minmax(150px,1fr));gap:.6rem}
+.gallery a{display:block;position:relative;text-decoration:none}
+.gallery img{width:100%;height:auto;aspect-ratio:16/9;object-fit:cover;border-radius:6px;display:block;border:1px solid var(--line)}
+.gallery span{position:absolute;left:4px;bottom:4px;font:600 11px ui-monospace,Consolas,monospace;background:rgba(0,0,0,.72);color:#fff;padding:1px 5px;border-radius:3px}
+p.par{margin:0 0 1.05rem}
+p.cue{color:var(--muted);font-style:italic;font-size:.92rem}
+figure{margin:1.6rem 0;scroll-margin-top:4.5rem}
+figure img{width:100%;height:auto;border-radius:8px;border:1px solid var(--line);cursor:zoom-in;display:block}
+figcaption{font:13px/1.45 system-ui,sans-serif;color:var(--muted);margin-top:.4rem}
+mark{background:var(--mark);color:inherit;border-radius:2px}
+.hide{display:none!important}
+details{margin:1rem 0}
+summary{cursor:pointer;font:600 14px system-ui,sans-serif}
+pre{white-space:pre-wrap;word-break:break-word;background:var(--code);padding:1rem;border-radius:8px;font:13px/1.5 ui-monospace,Consolas,monospace}
+footer{margin-top:3rem;font:13px system-ui,sans-serif;color:var(--muted)}
+dialog{border:0;padding:0;background:transparent;max-width:96vw;max-height:94vh}
+dialog::backdrop{background:rgba(0,0,0,.85)}
+dialog img{max-width:96vw;max-height:88vh;display:block;border-radius:6px}
+dialog p{color:#ddd;font:13px system-ui,sans-serif;text-align:center;margin:.5rem 0 0}
+.theme{background:none;border:1px solid var(--line);color:var(--muted);border-radius:6px;font:13px system-ui,sans-serif;padding:.3rem .5rem;cursor:pointer}
+@media print{header.top,.gallery,#lb{display:none}body{background:#fff;color:#000}a.ts{background:none;color:#555}}
+"""
+
+_JS = """
+(function(){
+  var root=document.documentElement;
+  try{var t=localStorage.getItem('ytt-theme');if(t)root.dataset.theme=t;}catch(e){}
+  var tb=document.getElementById('theme');
+  if(tb)tb.onclick=function(){var dark=root.dataset.theme?root.dataset.theme==='dark':matchMedia('(prefers-color-scheme: dark)').matches;
+    root.dataset.theme=dark?'light':'dark';try{localStorage.setItem('ytt-theme',root.dataset.theme);}catch(e){}};
+  var q=document.getElementById('q'),hits=document.getElementById('hits');
+  var items=[].slice.call(document.querySelectorAll('#transcript p.par'));
+  items.forEach(function(p){p.dataset.raw=p.innerHTML;});
+  var others=[].slice.call(document.querySelectorAll('#transcript figure, #transcript h3'));
+  function esc(s){return s.replace(/[.*+?^${}()|[\\]\\\\]/g,'\\\\$&');}
+  var timer;
+  if(q)q.addEventListener('input',function(){clearTimeout(timer);timer=setTimeout(run,120);});
+  function run(){
+    var v=q.value.trim(),n=0;
+    items.forEach(function(p){p.innerHTML=p.dataset.raw;});
+    if(!v){items.concat(others).forEach(function(e){e.classList.remove('hide');});hits.textContent='';return;}
+    var re=new RegExp('('+esc(v)+')','gi');
+    items.forEach(function(p){
+      var a=p.querySelector('a.ts'),body=p.innerHTML.slice(a?a.outerHTML.length:0);
+      var plain=p.textContent.slice(a?a.textContent.length:0);
+      if(re.test(plain)){n++;p.classList.remove('hide');
+        p.innerHTML=(a?a.outerHTML:'')+body.replace(/(^|>)([^<]+)/g,function(m,g1,g2){return g1+g2.replace(re,'<mark>$1</mark>');});}
+      else p.classList.add('hide');re.lastIndex=0;});
+    others.forEach(function(e){e.classList.add('hide');});
+    hits.textContent=n+' match'+(n===1?'':'es');
+  }
+  var lb=document.getElementById('lb');
+  document.addEventListener('click',function(ev){
+    var img=ev.target.closest&&ev.target.closest('figure img');
+    if(img&&lb&&lb.showModal){ev.preventDefault();lb.querySelector('img').src=img.src;
+      lb.querySelector('p').textContent=img.alt;lb.showModal();}
+    else if(lb&&ev.target===lb)lb.close();
+  });
+  if(lb)lb.addEventListener('click',function(){lb.close();});
+})();
+"""
+
+
+def _img_src(rel: str, base_dir: Path, embed: bool) -> str:
+    if embed:
+        p = base_dir / rel
+        try:
+            b64 = base64.b64encode(p.read_bytes()).decode("ascii")
+            return f"data:image/jpeg;base64,{b64}"
+        except OSError:
+            pass
+    return _quote_path(rel)
+
+
+def _h_ts(data: VideoData, t: float) -> str:
+    return f'<a class="ts" href="{html.escape(watch_url(data.video_id, t))}" target="_blank" rel="noopener">{fmt_time(t)}</a>'
+
+
+def render_html(
+    data: VideoData,
+    paragraphs: list[Paragraph],
+    shots: list[Shot],
+    summary_md: str,
+    base_dir: Path,
+    *,
+    timestamps: bool = True,
+    embed_images: bool = False,
+) -> str:
+    e = html.escape
+    meta = "".join(
+        f"<span><b>{e(k)}:</b> " + (f'<a href="{e(data.channel_url)}">{e(v)}</a>' if k == "Channel" and data.channel_url else e(v)) + "</span>"
+        for k, v in _meta_bits(data)
+    )
+    nav = ['<a href="#summary">Summary</a>']
+    if data.chapters:
+        nav.append('<a href="#chapters">Chapters</a>')
+    if shots:
+        nav.append('<a href="#screens">Screens</a>')
+    nav.append('<a href="#transcript">Transcript</a>')
+
+    body: list[str] = []
+    body.append(f"<h1>{e(display_title(data))}</h1>")
+    body.append(f'<div class="meta">{meta}<span><a href="{e(data.url)}">Watch on YouTube</a></span></div>')
+    if data.thumbnail:
+        body.append(f'<a href="{e(data.url)}"><img class="hero" src="{e(data.thumbnail)}" alt="Video thumbnail" loading="lazy"></a>')
+
+    body.append('<h2 id="summary">Summary</h2>')
+    body.append(f'<div class="summary">{HTML_START}\n{md_to_html(summary_md)}\n{HTML_END}</div>')
+
+    if data.chapters:
+        body.append('<h2 id="chapters">Chapters</h2><ol class="chapters">')
+        for i, c in enumerate(data.chapters):
+            body.append(f'<li>{_h_ts(data, c.start)}<a href="#ch-{i}">{e(c.title)}</a></li>')
+        body.append("</ol>")
+
+    if shots:
+        body.append(f'<h2 id="screens">Screens <small>({len(shots)})</small></h2><div class="gallery">')
+        for s in shots:
+            src = _img_src(s.file, base_dir, embed_images)
+            body.append(f'<a href="#shot-{int(s.time)}" title="{e(_shot_caption(s))}"><img src="{src}" alt="{e(fmt_time(s.time))}" loading="lazy"><span>{fmt_time(s.time)}</span></a>')
+        body.append("</div>")
+
+    body.append('<h2 id="transcript">Transcript</h2><div id="transcript">')
+    for kind, obj in layout(data, paragraphs, shots):
+        if kind == "chapter":
+            c = data.chapters[obj]  # type: ignore[index]
+            body.append(f'<h3 id="ch-{obj}">{_h_ts(data, c.start)}{e(c.title)}</h3>')
+        elif kind == "shot":
+            s: Shot = obj  # type: ignore[assignment]
+            src = _img_src(s.file, base_dir, embed_images)
+            cap = e(_shot_caption(s))
+            body.append(
+                f'<figure id="shot-{int(s.time)}"><img src="{src}" alt="{fmt_time(s.time)} · {cap}" loading="lazy">'
+                f"<figcaption>{_h_ts(data, s.time)}{cap}</figcaption></figure>"
+            )
+        else:
+            p: Paragraph = obj  # type: ignore[assignment]
+            cls = "par cue" if p.is_cue else "par"
+            ts = _h_ts(data, p.start) if timestamps else ""
+            body.append(f'<p class="{cls}">{ts}{e(p.text)}</p>')
+    body.append("</div>")
+
+    if data.description.strip():
+        body.append(f'<h2 id="description">Video description</h2><details><summary>Show description</summary><pre>{e(data.description.strip())}</pre></details>')
+    body.append(f"<footer>Notes generated by yt-transcript on {_now()} from YouTube captions. Timestamps open that moment on YouTube.</footer>")
+
+    return f"""<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="light dark">
+<title>{e(display_title(data))}</title>
+<style>{_CSS}</style>
+</head>
+<body>
+<header class="top"><div class="wrap"><nav>{''.join(nav)}</nav>
+<input id="q" type="search" placeholder="Search transcript" aria-label="Search transcript"><span id="hits" aria-live="polite"></span>
+<button class="theme" id="theme" type="button" aria-label="Toggle dark mode">◐</button></div></header>
+<main class="wrap">
+{chr(10).join(body)}
+</main>
+<dialog id="lb"><img alt=""><p></p></dialog>
+<script>{_JS}</script>
+</body>
+</html>
+"""
