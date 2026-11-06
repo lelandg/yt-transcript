@@ -463,9 +463,15 @@ def test_sibling_ownership_comes_from_metadata_not_links(tmp_path):
     # Another video's page whose summary links to abcdefghijk must not be claimed by it.
     linked = "See [this one](https://www.youtube.com/watch?v=abcdefghijk&t=5s)."
     plain = [Paragraph(0, 1, "Other video text.")]
+    # Each format on its own, so a regression in either check is caught.
     (tmp_path / "A.html").write_text(render.render_html(other, plain, [], linked, tmp_path), encoding="utf-8")
-    (tmp_path / "A.txt").write_text(render.render_txt(other, plain, [], linked), encoding="utf-8")
     assert yt_transcript._name_taken(tmp_path, "A", "abcdefghijk") is True
+    (tmp_path / "A2.txt").write_text(render.render_txt(other, plain, [], linked), encoding="utf-8")
+    assert yt_transcript._name_taken(tmp_path, "A2", "abcdefghijk") is True
+    # JSON video_id of the wrong type counts as unknown, not a crash.
+    for i, bad in enumerate(("[]", "{}", "null")):
+        (tmp_path / f"J{i}.json").write_text('{"video_id": %s}' % bad, encoding="utf-8")
+        assert yt_transcript._name_taken(tmp_path, f"J{i}", "abcdefghijk") is True
     # Siblings whose metadata names this video stay reusable, in every format.
     (tmp_path / "B.html").write_text(render.render_html(data, paras, [], "s", tmp_path), encoding="utf-8")
     (tmp_path / "B.txt").write_text(render.render_txt(data, paras, [], "s"), encoding="utf-8")
@@ -481,7 +487,8 @@ def test_write_atomic_keeps_permissions_and_follows_symlinks(tmp_path):
     import stat
     target = tmp_path / "real.md"
     target.write_text("old", encoding="utf-8")
-    os.chmod(target, stat.S_IREAD | stat.S_IWRITE)
+    # mkstemp makes 0600 files; group-read (POSIX) proves the mode is copied, not defaulted.
+    os.chmod(target, stat.S_IREAD | stat.S_IWRITE | (stat.S_IRGRP if os.name == "posix" else 0))
     before = stat.S_IMODE(target.stat().st_mode)
     summary.write_atomic(target, "new")
     assert stat.S_IMODE(target.stat().st_mode) == before

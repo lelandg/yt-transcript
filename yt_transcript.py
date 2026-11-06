@@ -160,7 +160,8 @@ def _sibling_video_id(path: Path) -> str | None:
             d = json.loads(text)
         except ValueError:
             return None
-        return d.get("video_id") if isinstance(d, dict) else None
+        vid = d.get("video_id") if isinstance(d, dict) else None
+        return vid if isinstance(vid, str) else None  # [] / {} would be unhashable
     if path.suffix == ".html":
         m = re.search(r'<meta name="yt-video-id" content="([A-Za-z0-9_-]{11})">', text.split("</head>", 1)[0])
         return m.group(1) if m else None
