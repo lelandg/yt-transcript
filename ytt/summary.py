@@ -56,6 +56,7 @@ def extractive(paragraphs: list[Paragraph], n: int = 5) -> list[tuple[float, str
     total = len(sents)
 
     def score(ws: list[str]) -> float:
+        """TF-IDF weight of a sentence's words, normalised for length."""
         return sum(math.log(1 + tf[w]) * math.log(1 + total / df[w]) for w in set(ws)) / (len(ws) ** 0.5)
 
     ranked = sorted(range(len(sents)), key=lambda i: score(sents[i][2]), reverse=True)
@@ -97,6 +98,7 @@ def _inline(s: str) -> str:
     links: list[str] = []
 
     def stash(m: re.Match) -> str:
+        """Replace one link with a placeholder and remember its HTML."""
         if m.group("auto"):
             url = m.group("auto")
             links.append(f'<a href="{url}">{url}</a>')
@@ -115,11 +117,13 @@ def md_to_html(md: str) -> str:
     para: list[str] = []
 
     def close_para() -> None:
+        """Emit the pending paragraph, if any."""
         if para:
             out.append("<p>" + _inline(" ".join(para)) + "</p>")
             para.clear()
 
     def close_list() -> None:
+        """Close the open list, if any."""
         nonlocal list_tag
         if list_tag:
             out.append(f"</{list_tag}>")

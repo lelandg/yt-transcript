@@ -65,6 +65,7 @@ def display_title(data: VideoData) -> str:
 
 
 def _shot_caption(s: Shot) -> str:
+    """Why a screenshot was taken, for its caption."""
     return " · ".join(s.reasons) if s.reasons else "Screenshot"
 
 
