@@ -606,3 +606,15 @@ def test_requested_shot_keeps_its_fractional_time(tmp_path, monkeypatch):
     data = VideoData("abcdefghijk", "u", "T", duration=60)
     got = shots.capture(data, tmp_path / "a", "a", mode="chapters", extra_times=[12.9, 12.2], limit=0)
     assert seen == [12.9] and got[0].time == 12.9
+
+
+def test_md_owned_but_sibling_names_another_video_is_taken(tmp_path):
+    data, paras = _sample()  # abcdefghijk
+    other = VideoData("zzzzzzzzzzz", "https://www.youtube.com/watch?v=zzzzzzzzzzz", "Other", segments=[seg(0, "x")])
+    plain = [Paragraph(0, 1, "Other video text.")]
+    (tmp_path / "M.md").write_text(render.render_md(data, paras, [], "s"), encoding="utf-8")
+    assert yt_transcript._name_taken(tmp_path, "M", "abcdefghijk") is False
+    (tmp_path / "M.html").write_text("<html>old page, no metadata</html>", encoding="utf-8")
+    assert yt_transcript._name_taken(tmp_path, "M", "abcdefghijk") is False  # unknown owner: no block
+    (tmp_path / "M.json").write_text(render.render_json(other, plain, [], "s"), encoding="utf-8")
+    assert yt_transcript._name_taken(tmp_path, "M", "abcdefghijk") is True

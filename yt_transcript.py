@@ -135,16 +135,20 @@ def _same_video(md_path: Path, video_id: str) -> bool:
 def _name_taken(out_dir: Path, stem: str, video_id: str) -> bool:
     """True when files under this name exist and are not this video's.
 
-    With the .md present, its header decides. Without it, leftover siblings
+    With the .md present, it must be this video's, and no sibling may name
+    another video (older runs could leave mixed owners; a sibling with no
+    readable owner does not block). Without the .md, leftover siblings
     (.html/.txt/.json or the _files folder) count as taken unless their own
     metadata names this video and none names another. Links inside a summary
     or description never count: only each format's metadata is read.
     """
     md = out_dir / f"{stem}.md"
-    if md.exists():
-        return not _same_video(md, video_id)
     siblings = [out_dir / f"{stem}{s}" for s in (".html", ".txt", ".json")]
     present = [p for p in siblings if p.exists()]
+    if md.exists():
+        if not _same_video(md, video_id):
+            return True
+        return bool({_sibling_video_id(p) for p in present} - {None, video_id})
     if not present and not (out_dir / f"{stem}_files").exists():
         return False
     owners = {_sibling_video_id(p) for p in present}
