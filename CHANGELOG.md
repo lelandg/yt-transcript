@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.3] - 2026-11-06
+
+### Fixed
+- A notes name whose `.md` belongs to this video is still treated as taken when a sibling (`.html`, `.txt`, `.json`) names a different video, which older runs could leave behind. This prevents overwriting the other video's file.
+
 ## [0.1.2] - 2026-11-06
 
 ### Fixed
