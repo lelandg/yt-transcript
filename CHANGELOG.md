@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.2] - 2026-11-06
+
+### Fixed
+- Notes for a different video with the same filename are no longer overwritten (and its screenshots no longer deleted): the new notes get a ` [video_id]` suffix. Ownership is read from each file's metadata (Markdown header, HTML `yt-video-id` meta, text header, JSON `video_id`), never from links in a summary.
+- Summary HTML: a `<https://…>` autolink inside a Markdown link URL can no longer write markup into `href`. Bold or code formatting around a link still works.
+- `--shot-times`: requested frames don't use up the `--max-shots` allowance, keep their exact time, and merge when they fall within one second. `--max-shots 0` keeps only the requested frames. Negative, `inf`, and `nan` times are rejected.
+- `add_summary`: rejects corrupt or non-object JSON before changing anything. Writes are atomic, keep permissions, and follow symlinks. A `.txt` without markers is reported as skipped.
+- HTML search highlights text nodes only, so `&` and other entities display correctly.
+- `run.py` never deletes a venv folder it didn't create, removes a half-built one it did, and reports pip failures clearly. `run.ps1` exits 1 when Python is missing.
+- Repeated `main()` calls no longer stack log handlers.
+
 ## [0.1.1] - 2026-11-06
 
 ### Fixed
