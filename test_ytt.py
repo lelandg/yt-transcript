@@ -1,5 +1,6 @@
 """Offline tests for the ytt package (no network)."""
 
+import re
 from pathlib import Path
 
 import pytest
@@ -326,9 +327,11 @@ def test_rerun_refreshes_existing_siblings(tmp_path, monkeypatch):
     monkeypatch.setattr(fetch, "get_video", lambda *a, **k: data)
     assert yt_transcript.main(["abcdefghijk", "--html", "-d", str(tmp_path), "-q"]) == 0
     html_file = tmp_path / "T.html"
-    html_file.write_text("stale", encoding="utf-8")
+    # An older page of the same video (identifiable, so still ours), with stale content.
+    html_file.write_text(render.render_html(data, [], [], "STALE SUMMARY", tmp_path), encoding="utf-8")
     assert yt_transcript.main(["abcdefghijk", "-d", str(tmp_path), "-q"]) == 0
-    assert html_file.read_text(encoding="utf-8").startswith("<!doctype html>")
+    refreshed = html_file.read_text(encoding="utf-8")
+    assert refreshed.startswith("<!doctype html>") and "STALE SUMMARY" not in refreshed
 
 
 def test_fetch_error_keeps_full_message(tmp_path, monkeypatch, caplog):
@@ -614,7 +617,26 @@ def test_md_owned_but_sibling_names_another_video_is_taken(tmp_path):
     plain = [Paragraph(0, 1, "Other video text.")]
     (tmp_path / "M.md").write_text(render.render_md(data, paras, [], "s"), encoding="utf-8")
     assert yt_transcript._name_taken(tmp_path, "M", "abcdefghijk") is False
-    (tmp_path / "M.html").write_text("<html>old page, no metadata</html>", encoding="utf-8")
-    assert yt_transcript._name_taken(tmp_path, "M", "abcdefghijk") is False  # unknown owner: no block
     (tmp_path / "M.json").write_text(render.render_json(other, plain, [], "s"), encoding="utf-8")
     assert yt_transcript._name_taken(tmp_path, "M", "abcdefghijk") is True
+
+
+def test_unknown_sibling_owner_blocks_reuse(tmp_path):
+    data, paras = _sample()
+    (tmp_path / "U.md").write_text(render.render_md(data, paras, [], "s"), encoding="utf-8")
+    (tmp_path / "U.html").write_text("<html>someone's page, no metadata</html>", encoding="utf-8")
+    assert yt_transcript._name_taken(tmp_path, "U", "abcdefghijk") is True
+
+
+def test_pre_v012_html_is_identified_by_its_watch_link(tmp_path):
+    data, paras = _sample()
+    other = VideoData("zzzzzzzzzzz", "https://www.youtube.com/watch?v=zzzzzzzzzzz", "Other", segments=[seg(0, "x")])
+    plain = [Paragraph(0, 1, "Other video text.")]
+    # Simulate an older page: drop the yt-video-id meta tag.
+    old = lambda v, p, s: re.sub(r'<meta name="yt-video-id"[^>]*>\n', "", render.render_html(v, p, [], s, tmp_path))
+    (tmp_path / "L.md").write_text(render.render_md(data, paras, [], "s"), encoding="utf-8")
+    (tmp_path / "L.html").write_text(old(data, paras, "s"), encoding="utf-8")
+    assert yt_transcript._name_taken(tmp_path, "L", "abcdefghijk") is False
+    # An older page for another video, even one whose summary links to ours, is someone else's.
+    (tmp_path / "L.html").write_text(old(other, plain, "[x](https://www.youtube.com/watch?v=abcdefghijk)"), encoding="utf-8")
+    assert yt_transcript._name_taken(tmp_path, "L", "abcdefghijk") is True

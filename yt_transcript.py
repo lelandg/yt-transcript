@@ -135,24 +135,20 @@ def _same_video(md_path: Path, video_id: str) -> bool:
 def _name_taken(out_dir: Path, stem: str, video_id: str) -> bool:
     """True when files under this name exist and are not this video's.
 
-    With the .md present, it must be this video's, and no sibling may name
-    another video (older runs could leave mixed owners; a sibling with no
-    readable owner does not block). Without the .md, leftover siblings
-    (.html/.txt/.json or the _files folder) count as taken unless their own
-    metadata names this video and none names another. Links inside a summary
-    or description never count: only each format's metadata is read.
+    The .md (when present) and every sibling (.html/.txt/.json) must be
+    provably this video's: a sibling naming another video, or one whose owner
+    cannot be read, makes the name taken, because a re-run rewrites siblings.
+    A _files folder with nothing that proves its owner is taken too. Links
+    inside a summary or description never count: only each format's metadata.
     """
     md = out_dir / f"{stem}.md"
     siblings = [out_dir / f"{stem}{s}" for s in (".html", ".txt", ".json")]
     present = [p for p in siblings if p.exists()]
-    if md.exists():
-        if not _same_video(md, video_id):
-            return True
-        return bool({_sibling_video_id(p) for p in present} - {None, video_id})
-    if not present and not (out_dir / f"{stem}_files").exists():
-        return False
-    owners = {_sibling_video_id(p) for p in present}
-    return owners != {video_id}
+    if md.exists() and not _same_video(md, video_id):
+        return True
+    if not md.exists() and not present:
+        return (out_dir / f"{stem}_files").exists()
+    return any(_sibling_video_id(p) != video_id for p in present)
 
 
 def _sibling_video_id(path: Path) -> str | None:
@@ -170,6 +166,12 @@ def _sibling_video_id(path: Path) -> str | None:
         return vid if isinstance(vid, str) else None  # [] / {} would be unhashable
     if path.suffix == ".html":
         m = re.search(r'<meta name="yt-video-id" content="([A-Za-z0-9_-]{11})">', text.split("</head>", 1)[0])
+        if m:
+            return m.group(1)
+        # Pages from before v0.1.2 have no meta tag; their header's
+        # "Watch on YouTube" link (written before the summary) names the video.
+        header = text.split('id="summary"', 1)[0]
+        m = re.search(r'href="https://www\.youtube\.com/watch\?v=([A-Za-z0-9_-]{11})">Watch on YouTube</a>', header)
         return m.group(1) if m else None
     # .txt: the header (title, metadata line, URL) ends where [summary] starts.
     m = re.search(r"watch\?v=([A-Za-z0-9_-]{11})", text.split("[summary]", 1)[0])
