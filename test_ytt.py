@@ -338,3 +338,136 @@ def test_fetch_error_keeps_full_message(tmp_path, monkeypatch, caplog):
     with caplog.at_level("ERROR", logger="yt_transcript"):
         assert yt_transcript.main(["abcdefghijk", "-d", str(tmp_path), "-q"]) == 1
     assert "blocking requests from your IP" in caplog.text
+
+
+# --------------------------------------------------------------------------- CodeRabbit retro review (PR #4)
+
+import json as _json
+import logging as _logging
+
+import add_summary
+
+
+def test_nested_autolink_inside_link_cannot_inject():
+    h = summary.md_to_html('[a](https://x/<https://evil/" onmouseover="alert(1)>)')
+    assert "onmouseover=\"" not in h
+    assert h.count("<a ") <= 1
+
+
+def test_link_text_still_gets_emphasis_and_urls_do_not():
+    h = summary.md_to_html("[**bold**](https://x/*a*) and <https://y/z>")
+    assert '<a href="https://x/*a*"><strong>bold</strong></a>' in h
+    assert '<a href="https://y/z">https://y/z</a>' in h
+
+
+@pytest.mark.parametrize("bad", ["inf", "nan", "-5", "-1:00", "1e309"])
+def test_parse_time_rejects_nonfinite_and_negative(bad):
+    with pytest.raises(ValueError):
+        parse_time(bad)
+
+
+def test_other_videos_notes_are_never_overwritten(tmp_path, monkeypatch):
+    a = VideoData("aaaaaaaaaaa", "https://www.youtube.com/watch?v=aaaaaaaaaaa", "Same Title", segments=[seg(0, "First video.")])
+    b = VideoData("bbbbbbbbbbb", "https://www.youtube.com/watch?v=bbbbbbbbbbb", "Same Title", segments=[seg(0, "Second video.")])
+    monkeypatch.setattr(fetch, "get_video", lambda vid, *a_, **k: a if vid == "aaaaaaaaaaa" else b)
+    assert yt_transcript.main(["aaaaaaaaaaa", "-d", str(tmp_path), "-q"]) == 0
+    assert yt_transcript.main(["bbbbbbbbbbb", "-d", str(tmp_path), "-q"]) == 0
+    assert "First video." in (tmp_path / "Same Title.md").read_text(encoding="utf-8")
+    assert "Second video." in (tmp_path / "Same Title [bbbbbbbbbbb].md").read_text(encoding="utf-8")
+    # Re-running the first video still regenerates its own file in place.
+    assert yt_transcript.main(["aaaaaaaaaaa", "-d", str(tmp_path), "-q"]) == 0
+    assert not (tmp_path / "Same Title [aaaaaaaaaaa].md").exists()
+
+
+def test_inject_is_all_or_nothing(tmp_path):
+    data, paras = _sample()
+    md = tmp_path / "n.md"
+    md.write_text(render.render_md(data, paras, [], "auto"), encoding="utf-8")
+    md.with_suffix(".html").write_text("<html>no markers</html>", encoding="utf-8")
+    before = md.read_text(encoding="utf-8")
+    with pytest.raises(ValueError):
+        summary.inject(md, "New summary")
+    assert md.read_text(encoding="utf-8") == before
+
+
+def test_inject_skips_txt_without_markers(tmp_path, caplog):
+    data, paras = _sample()
+    md = tmp_path / "n.md"
+    md.write_text(render.render_md(data, paras, [], "auto"), encoding="utf-8")
+    md.with_suffix(".txt").write_text("plain text, no markers", encoding="utf-8")
+    with caplog.at_level("WARNING", logger="yt_transcript"):
+        changed = summary.inject(md, "New summary")
+    assert changed == [md] and "Skipped n.txt" in caplog.text
+
+
+def test_add_summary_refuses_corrupt_json_before_changing_anything(tmp_path):
+    data, paras = _sample()
+    md = tmp_path / "n.md"
+    md.write_text(render.render_md(data, paras, [], "auto"), encoding="utf-8")
+    md.with_suffix(".json").write_text("{not json", encoding="utf-8")
+    s = tmp_path / "s.md"
+    s.write_text("Written summary", encoding="utf-8")
+    before = md.read_text(encoding="utf-8")
+    assert add_summary.main([str(md), str(s)]) == 1
+    assert md.read_text(encoding="utf-8") == before
+
+
+def test_add_summary_updates_json(tmp_path):
+    data, paras = _sample()
+    md = tmp_path / "n.md"
+    md.write_text(render.render_md(data, paras, [], "auto"), encoding="utf-8")
+    md.with_suffix(".json").write_text(render.render_json(data, paras, [], "auto"), encoding="utf-8")
+    s = tmp_path / "s.md"
+    s.write_text("Written summary", encoding="utf-8")
+    assert add_summary.main([str(md), str(s)]) == 0
+    assert _json.loads(md.with_suffix(".json").read_text(encoding="utf-8"))["summary_md"] == "Written summary"
+    assert not list(tmp_path.glob("*.tmp"))
+
+
+def test_setup_logging_does_not_stack_handlers():
+    caller = _logging.NullHandler()
+    yt_transcript.log.addHandler(caller)
+    try:
+        yt_transcript.setup_logging(False, True)
+        n = len(yt_transcript.log.handlers)
+        yt_transcript.setup_logging(False, True)
+        assert len(yt_transcript.log.handlers) == n
+        assert caller in yt_transcript.log.handlers
+    finally:
+        yt_transcript.log.removeHandler(caller)
+
+
+def _fake_capture_env(monkeypatch, tmp_path):
+    """Stub out the network and ffmpeg so capture() selection logic runs offline."""
+    monkeypatch.setattr(shots, "ffmpeg_exe", lambda: "ffmpeg")
+    video = tmp_path / "v.mp4"
+    video.write_bytes(b"x")
+    monkeypatch.setattr(shots, "download_video", lambda *a, **k: video)
+    monkeypatch.setattr(shots, "scene_candidates", lambda *a, **k: [])
+    counter = iter(range(10_000))
+
+    def grab(ff, v, t, out, width=1280):
+        out.write_bytes(b"jpg")
+        return True
+
+    monkeypatch.setattr(shots, "grab_frame", grab)
+    # Every frame gets a very different hash, so nothing is deduplicated.
+    monkeypatch.setattr(shots, "dhash", lambda ff, img, size=16: (next(counter) * 0x9E3779B97F4A7C15) % (1 << 256))
+
+
+def test_requested_shots_do_not_use_the_auto_allowance(tmp_path, monkeypatch):
+    _fake_capture_env(monkeypatch, tmp_path)
+    data = VideoData("abcdefghijk", "u", "T", duration=600,
+                     chapters=[Chapter(i * 60, i * 60 + 60, f"C{i}") for i in range(10)])
+    got = shots.capture(data, tmp_path / "a", "a", mode="chapters", extra_times=[5.2, 5.7, 300], limit=3)
+    requested = [s for s in got if "Requested" in s.reasons]
+    assert len(requested) == 2  # 5.2 and 5.7 are one second -> one frame
+    assert len(got) - len(requested) == 3
+
+
+def test_max_shots_zero_keeps_only_requested(tmp_path, monkeypatch):
+    _fake_capture_env(monkeypatch, tmp_path)
+    data = VideoData("abcdefghijk", "u", "T", duration=600,
+                     chapters=[Chapter(i * 60, i * 60 + 60, f"C{i}") for i in range(10)])
+    got = shots.capture(data, tmp_path / "a", "a", mode="auto", extra_times=[42], limit=0)
+    assert [s.time for s in got] == [42]

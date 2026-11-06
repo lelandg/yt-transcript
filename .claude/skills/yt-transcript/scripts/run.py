@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import hashlib
 import os
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -85,7 +86,13 @@ def ensure_venv(project: Path) -> Path:
     else:
         venv = project / tag
         say(f"Creating {venv}")
-        subprocess.run([sys.executable, "-m", "venv", str(venv)], check=True)
+        if subprocess.run([sys.executable, "-m", "venv", str(venv)]).returncode != 0:
+            # A half-built venv (python but no pip) would be reused next time; remove it.
+            shutil.rmtree(venv, ignore_errors=True)
+            sys.exit(
+                f"ERROR: could not create {venv}. On Debian/Ubuntu install python3-venv "
+                f"(sudo apt install python3-venv), then run this again."
+            )
     py = venv_python(venv)
 
     req = project / "requirements.txt"
@@ -95,7 +102,13 @@ def ensure_venv(project: Path) -> Path:
     have = stamp.read_text().strip() if stamp.exists() else ""
     if have != want:
         say(f"Installing requirements into {venv.name}")
-        subprocess.run([str(py), "-m", "pip", "install", "--quiet", "--disable-pip-version-check", "-r", str(req)], check=True)
+        cmd = [str(py), "-m", "pip", "install", "--quiet", "--disable-pip-version-check", "-r", str(req)]
+        if subprocess.run(cmd).returncode != 0:
+            # No stamp is written, so the next run retries the install.
+            sys.exit(
+                f"ERROR: installing requirements into {venv} failed (see pip's output above). "
+                f"Fix the cause and run again, or delete {venv} to rebuild it."
+            )
         stamp.write_text(want)
     return py
 

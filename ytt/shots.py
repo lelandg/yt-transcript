@@ -276,26 +276,33 @@ def capture(
         cands += heatmap_candidates(data.heatmap)
     if interval:
         cands += interval_candidates(data.duration, interval)
-    forced = [Candidate(t, 100.0, ["Requested"]) for t in (extra_times or [])]
+    # Frame files are named to the second, so requested times within one second
+    # are one shot. Requested shots never count against the automatic limit.
+    seconds = sorted({int(t) for t in (extra_times or [])})
+    if extra_times and len(seconds) < len(extra_times):
+        log.info("Requested times within the same second were merged (%d -> %d)", len(extra_times), len(seconds))
+    forced = [Candidate(float(t), 100.0, ["Requested"]) for t in seconds]
+    if limit <= 0:
+        cands = []  # --max-shots 0: requested frames only
 
     with tempfile.TemporaryDirectory(prefix="ytt-", ignore_cleanup_errors=True) as tmp:
         log.info("Downloading video (<= %dp, video only) for screenshots...", max_height)
         video = download_video(data.video_id, Path(tmp), max_height)
         if not video:
             return []
-        if mode in ("auto", "scenes"):
+        if mode in ("auto", "scenes") and limit > 0:
             log.info("Detecting scene changes...")
             scenes = scene_candidates(ffmpeg, video)
             log.info("  %d scene changes", len(scenes))
             cands += scenes
-        if not cands and not forced:
+        if not cands and not forced and limit > 0:
             log.info("No moments found; falling back to fixed intervals")
             cands = interval_candidates(data.duration, max(30.0, data.duration / limit))
 
         merged = merge(cands)
         # Oversample: some frames will be dropped as duplicates.
-        chosen = forced + select(merged, int(limit * 1.6) + 2, min_gap, data.duration)
-        chosen.sort(key=lambda c: c.score, reverse=True)
+        auto = select(merged, int(limit * 1.6) + 2, min_gap, data.duration) if limit > 0 else []
+        chosen = forced + sorted(auto, key=lambda c: c.score, reverse=True)
 
         assets_dir.mkdir(parents=True, exist_ok=True)
         for old in assets_dir.glob("shot_*.jpg"):
@@ -303,16 +310,17 @@ def capture(
 
         kept: list[tuple[Shot, int | None]] = []
         dropped = 0
+        auto_kept = 0
         for c in chosen:
-            if len(kept) >= limit + len(forced):
-                break
+            is_forced = any(c is f for f in forced)
+            if not is_forced and auto_kept >= limit:
+                break  # forced shots come first in `chosen`, so all of them were handled
             out = assets_dir / shot_filename(c.time)
             if out.exists():
                 continue
             if not grab_frame(ffmpeg, video, c.time, out):
                 continue
             h = dhash(ffmpeg, out)
-            is_forced = c.score >= 100.0
             is_chapter = any(r.startswith("Chapter:") for r in c.reasons)
             limit_bits = int(HASH_SIZE * HASH_SIZE * (DUP_FRACTION_CHAPTER if is_chapter else DUP_FRACTION))
             if h is not None and not is_forced and any(
@@ -322,6 +330,8 @@ def capture(
                 dropped += 1
                 continue
             kept.append((Shot(c.time, f"{rel_prefix}/{out.name}", c.reasons, round(c.score, 2)), h))
+            if not is_forced:
+                auto_kept += 1
         if dropped:
             log.info("  dropped %d near-duplicate frames", dropped)
         if keep_video:

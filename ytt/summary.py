@@ -9,12 +9,16 @@ rewrites the Markdown and HTML siblings in place without refetching anything.
 from __future__ import annotations
 
 import html
+import logging
 import math
+import os
 import re
 from collections import Counter
 from pathlib import Path
 
 from .models import Paragraph
+
+log = logging.getLogger("yt_transcript")
 
 MD_START = "<!-- yt-summary:start -->"
 MD_END = "<!-- yt-summary:end -->"
@@ -67,14 +71,35 @@ def extractive(paragraphs: list[Paragraph], n: int = 5) -> list[tuple[float, str
 # --------------------------------------------------------------------------- md -> html (subset)
 
 
-def _inline(s: str) -> str:
-    s = html.escape(s)  # quote=True: link targets end up inside href="..."
+# [text](url) or <url>, matched in ONE pass over the escaped text, so a URL can
+# never be re-scanned after it has been placed inside an href attribute.
+_LINK_RE = re.compile(
+    r"\[(?P<text>[^\]]+)\]\((?P<url>https?://[^)\s]+)\)"
+    r"|&lt;(?P<auto>https?://[^\s&<>]+(?:&amp;[^\s&<>]+)*)&gt;"
+)
+
+
+def _emphasis(s: str) -> str:
+    """Code, bold, italic on already-escaped text (never on URLs)."""
     s = re.sub(r"`([^`]+)`", r"<code>\1</code>", s)
     s = re.sub(r"\*\*([^*]+)\*\*", r"<strong>\1</strong>", s)
-    s = re.sub(r"(?<![*\w])\*([^*\n]+)\*(?![*\w])", r"<em>\1</em>", s)
-    s = re.sub(r"\[([^\]]+)\]\((https?://[^)\s]+)\)", r'<a href="\2">\1</a>', s)
-    s = re.sub(r"&lt;(https?://[^\s&<>]+(?:&amp;[^\s&<>]+)*)&gt;", r'<a href="\1">\1</a>', s)  # <https://...> autolinks
-    return s
+    return re.sub(r"(?<![*\w])\*([^*\n]+)\*(?![*\w])", r"<em>\1</em>", s)
+
+
+def _inline(s: str) -> str:
+    s = html.escape(s)  # quote=True: a " in a URL becomes &quot; and cannot close href
+    out: list[str] = []
+    pos = 0
+    for m in _LINK_RE.finditer(s):
+        out.append(_emphasis(s[pos : m.start()]))
+        if m.group("auto"):
+            url = m.group("auto")
+            out.append(f'<a href="{url}">{url}</a>')
+        else:
+            out.append(f'<a href="{m.group("url")}">{_emphasis(m.group("text"))}</a>')
+        pos = m.end()
+    out.append(_emphasis(s[pos:]))
+    return "".join(out)
 
 
 def md_to_html(md: str) -> str:
@@ -143,22 +168,33 @@ def _replace_between(text: str, start: str, end: str, new: str) -> str:
 
 
 def inject(md_path: Path, summary_md: str) -> list[Path]:
-    """Replace the summary in the .md file and any sibling .html. Returns files changed."""
-    changed = []
+    """Replace the summary in the .md file and its .html / .txt siblings.
+
+    Every replacement is computed before anything is written, so a missing
+    marker in the md or html leaves all files untouched. A .txt without markers
+    is skipped (and reported), not treated as updated. Returns files changed.
+    """
+    planned: list[tuple[Path, str]] = []
     md_text = md_path.read_text(encoding="utf-8")
-    md_path.write_text(_replace_between(md_text, MD_START, MD_END, summary_md), encoding="utf-8")
-    changed.append(md_path)
+    planned.append((md_path, _replace_between(md_text, MD_START, MD_END, summary_md)))
     html_path = md_path.with_suffix(".html")
     if html_path.exists():
         h = html_path.read_text(encoding="utf-8")
-        html_path.write_text(_replace_between(h, HTML_START, HTML_END, md_to_html(summary_md)), encoding="utf-8")
-        changed.append(html_path)
+        planned.append((html_path, _replace_between(h, HTML_START, HTML_END, md_to_html(summary_md))))
     txt_path = md_path.with_suffix(".txt")
     if txt_path.exists():
-        t = txt_path.read_text(encoding="utf-8")
         try:
-            txt_path.write_text(_replace_between(t, "[summary]", "[/summary]", summary_md), encoding="utf-8")
-            changed.append(txt_path)
+            t = txt_path.read_text(encoding="utf-8")
+            planned.append((txt_path, _replace_between(t, "[summary]", "[/summary]", summary_md)))
         except ValueError:
-            pass
-    return changed
+            log.warning("Skipped %s: it has no [summary] markers", txt_path.name)
+    for path, new_text in planned:
+        write_atomic(path, new_text)
+    return [p for p, _ in planned]
+
+
+def write_atomic(path: Path, text: str) -> None:
+    """Write via a temp file + rename, so an interrupted write never truncates."""
+    tmp = path.with_name(path.name + ".tmp")
+    tmp.write_text(text, encoding="utf-8")
+    os.replace(tmp, path)

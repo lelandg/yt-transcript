@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 from dataclasses import asdict, dataclass, field
 
 
@@ -97,13 +98,20 @@ def parse_time(value: str) -> float:
                 raise ValueError(f"bad time: {value!r}")
         if num:
             total += float(num)
-        return total
+        return _checked_time(total, value)
     parts = v.split(":")
     if len(parts) > 3:
         raise ValueError(f"bad time: {value!r}")
     total = 0.0
     for p in parts:
         total = total * 60 + float(p)
+    return _checked_time(total, value)
+
+
+def _checked_time(total: float, value: str) -> float:
+    """Reject inf, nan, and negative times (float() accepts all three)."""
+    if not math.isfinite(total) or total < 0:
+        raise ValueError(f"bad time: {value!r}")
     return total
 
 

@@ -252,11 +252,25 @@ _JS = """
     if(!v){items.concat(others).forEach(function(e){e.classList.remove('hide');});hits.textContent='';return;}
     var re=new RegExp('('+esc(v)+')','gi');
     items.forEach(function(p){
-      var a=p.querySelector('a.ts'),body=p.innerHTML.slice(a?a.outerHTML.length:0);
+      var a=p.querySelector('a.ts');
       var plain=p.textContent.slice(a?a.textContent.length:0);
-      if(re.test(plain)){n++;p.classList.remove('hide');
-        p.innerHTML=(a?a.outerHTML:'')+body.replace(/(^|>)([^<]+)/g,function(m,g1,g2){return g1+g2.replace(re,'<mark>$1</mark>');});}
-      else p.classList.add('hide');re.lastIndex=0;});
+      re.lastIndex=0;
+      if(!re.test(plain)){p.classList.add('hide');return;}
+      n++;p.classList.remove('hide');
+      // Highlight text nodes only (never markup or entities), skipping the timestamp link.
+      var w=document.createTreeWalker(p,NodeFilter.SHOW_TEXT),nodes=[],t;
+      while((t=w.nextNode())){if(!(a&&a.contains(t)))nodes.push(t);}
+      nodes.forEach(function(t){
+        var s=t.nodeValue,frag=document.createDocumentFragment(),last=0,m;
+        re.lastIndex=0;
+        while((m=re.exec(s))){
+          frag.appendChild(document.createTextNode(s.slice(last,m.index)));
+          var mk=document.createElement('mark');mk.textContent=m[0];frag.appendChild(mk);
+          last=m.index+m[0].length;
+        }
+        if(last){frag.appendChild(document.createTextNode(s.slice(last)));t.parentNode.replaceChild(frag,t);}
+      });
+    });
     others.forEach(function(e){e.classList.add('hide');});
     hits.textContent=n+' match'+(n===1?'':'es');
   }

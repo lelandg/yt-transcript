@@ -44,9 +44,15 @@ def setup_logging(verbose: bool, quiet: bool) -> None:
             stream.reconfigure(encoding="utf-8", errors="replace")
         except (AttributeError, OSError):
             pass
+    # main() may run more than once in a process (tests, callers): drop and
+    # close only the handlers a previous call added; keep any the caller set.
+    for h in [h for h in log.handlers if getattr(h, "_ytt_owned", False)]:
+        log.removeHandler(h)
+        h.close()
     console = logging.StreamHandler(sys.stdout)
     console.setFormatter(logging.Formatter("%(levelname)s: %(message)s"))
     console.setLevel(level)
+    console._ytt_owned = True  # type: ignore[attr-defined]
     log.setLevel(logging.DEBUG)
     log.addHandler(console)
     # Warnings and errors also go to a per-user log file, on every OS.
@@ -56,6 +62,7 @@ def setup_logging(verbose: bool, quiet: bool) -> None:
         fh = logging.FileHandler(logfile, encoding="utf-8")
         fh.setLevel(logging.WARNING)
         fh.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(message)s"))
+        fh._ytt_owned = True  # type: ignore[attr-defined]
         log.addHandler(fh)
     except OSError:
         pass
@@ -187,6 +194,12 @@ def main(argv: list[str] | None = None) -> int:
     name = args.output or args.output_pos
     stem = paths.sanitize_filename(paths.strip_note_suffix(Path(name).name) if name else data.title)
     md_path = out_dir / f"{stem}.md"
+    if md_path.exists() and not _same_video(md_path, data.video_id):
+        # Another video already owns this name (same title, or a reused -o):
+        # never overwrite its notes or delete its screenshots.
+        stem = f"{stem} [{data.video_id}]"
+        md_path = out_dir / f"{stem}.md"
+        log.warning("%s.md belongs to another video; writing %s.md instead", md_path.stem.rsplit(" [", 1)[0], stem)
     log.info("Output folder: %s (%s)", out_dir, why)
 
     # Screenshots
