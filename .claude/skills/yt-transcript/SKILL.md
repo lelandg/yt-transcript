@@ -1,72 +1,119 @@
 ---
 name: yt-transcript
-description: Download a YouTube video's transcript to this project's Notes directory. Use whenever the user provides a YouTube URL (youtube.com/watch, youtu.be, shorts, embed) or a bare 11-character video ID and asks to fetch, save, download, grab, or transcribe the transcript/captions/subtitles — even if they don't explicitly name this skill. Also trigger on phrases like "get the transcript of this video", "save the captions", or "transcribe https://youtu.be/...".
+description: Turn a YouTube video into notes in one run, saved to the current project's Notes folder — summary, chapters, transcript formatted into timestamped paragraphs, and optionally HTML, plain text, JSON, and screenshots of key moments (slides, demos). Use whenever the user gives a YouTube URL (watch, youtu.be, shorts, embed, live) or an 11-character video ID and wants the transcript, captions, subtitles, notes, a summary, or screenshots of it — even if they don't name this skill. Also on "get the transcript of this video", "save the captions", "summarize this video", "grab the slides from this talk".
 ---
 
 # yt-transcript
 
-Downloads a YouTube transcript via the project's own `yt_transcript.py` and saves the output into `./Notes/`.
+One call fetches everything and writes the notes; then you write the summary
+into them. Fetches are cached per video, so later runs (new format, more
+screenshots) never hit YouTube again unless `--refresh` is passed.
 
-This is the project-local copy of the skill — the wrappers in `scripts/` resolve the project root relative to their own location, so it just works wherever the repo is cloned.
+## 1. Run it once
 
-## When to use
-
-Trigger whenever the user supplies a YouTube URL or a bare 11-character video ID and wants the transcript captured to a file. Accepts any URL form the underlying script supports: full `youtube.com/watch?v=...`, `youtu.be/...`, `/shorts/...`, `/embed/...`, or a raw ID like `dQw4w9WgXcQ`.
-
-## How to run
-
-Use the bundled wrapper. It handles the full venv lifecycle so we don't depend on whatever Python happens to be on PATH or a stale global pip install:
-
-1. cd into the project root
-2. Pick a venv: on Linux/WSL prefer `.venv_linux`, on Windows prefer `.venv_windows`; fall back to `.venv`; create the platform-specific one if neither exists
-3. Activate it
-4. Install `requirements.txt` if `youtube_transcript_api` isn't importable
-5. Run `yt_transcript.py` with whatever args we pass
-
-**PowerShell (Windows):**
-
-```powershell
-& ".\.claude\skills\yt-transcript\scripts\run.ps1" "<URL_OR_ID>"
-```
-
-**Bash (Linux/WSL/macOS):**
+`<skill>` is this skill's base directory (shown when the skill loads).
+`<cwd>` is the session's working folder. Use `python` on Windows (PowerShell
+tool), `python3` on macOS, Linux, and WSL.
 
 ```bash
-bash ./.claude/skills/yt-transcript/scripts/run.sh "<URL_OR_ID>"
+python3 "<skill>/scripts/run.py" "<URL_OR_ID>" --base-dir "<cwd>" [flags]
 ```
 
-The wrapper cwd's into the project root, so the `yt_transcript.py` default output of `./Notes` lands in the right place automatically. Pass `-d <path>` to override.
+The launcher finds the yt-transcript project, makes or reuses the per-OS
+venv, installs pinned requirements only when they change, and leaves the
+working directory alone. First run takes a minute; later runs take seconds.
 
-First run creates the venv and installs deps; subsequent runs skip that and just execute.
+**Where notes go** (the script decides; don't pass `-d` unless asked):
+the git root of `<cwd>` if it is in a repo, else `<cwd>` itself, then
+`/Notes` (an existing `notes`/`Notes` folder is reused). With no usable working
+folder (home, a drive root, temp), it falls back to the yt-transcript
+project's own `Notes`.
 
-**Why a venv (not `uv run`, not global pip):** `uv run` installs the latest `youtube-transcript-api` on every fresh cache, and newer releases trip YouTube's bot-block much more aggressively on the same residential IP. A pinned venv avoids that churn — once the venv has a working version, it keeps working.
+**Flags.** Default (no flags) writes the Markdown notes: metadata, summary,
+chapters, and the formatted, timestamped transcript. Add only what the user
+asks for:
 
-## Useful flags
-
-Pass these through when the user asks for the corresponding behavior — don't add them speculatively:
-
-| User intent | Flag |
+| User wants | Flag |
 |---|---|
-| Custom filename | `-o <name>` |
-| Include `[HH:MM:SS]` timestamps | `-t` |
-| Non-English / specific language | `-l <code>` (e.g. `-l es`) |
-| Reformat into readable prose | `-r` |
-| ML-based punctuation restore | `-r -m full` |
-| Sentences per paragraph | `-p <N>` (with `-r`) |
+| Everything (HTML, text, JSON, screenshots) | `--all` |
+| A web page (search box, screenshot gallery, dark mode) | `--html` |
+| HTML as one portable file, images embedded | `--html --self-contained` |
+| Screenshots of key moments | `-s` (same as `-s auto`) |
+| Screenshots from chapters / speaker cues / scene changes / replay peaks only | `-s chapters` · `-s cues` · `-s scenes` · `-s heatmap` |
+| Frames at specific times | `--shot-times 1:30 4:05` |
+| A frame every N seconds | `--shot-interval 30` |
+| More or fewer frames | `--max-shots N` (default ≈1 per minute, 6–24) |
+| Plain text / data | `--txt` · `--json` |
+| Another language | `-l es` (several allowed: `-l de en`) |
+| Custom filename | `-o "Name"` |
+| No paragraph timestamps / raw caption lines | `--no-timestamps` · `--raw` |
+| Better punctuation (ML, ~500 MB model) | `-m full` |
+| Refetch, ignoring the cache | `--refresh` |
 
-Example with flags:
+Old flags `-t` and `-r` are accepted and ignored: timestamps and formatting are now the default.
 
-```powershell
-& ".\.claude\skills\yt-transcript\scripts\run.ps1" "<URL>" -t -r
-```
+**How auto screenshots are chosen.** Moments come from four signals, merged
+when they land within 6 s of each other so agreeing signals win: chapter
+starts; speaker cues ("as you can see", "this slide", "right here", "let me
+show you"); ffmpeg scene changes (new slide, new view); and YouTube's "most
+replayed" peaks. The top picks are captured from a ≤720p download, then
+near-duplicate frames are dropped (perceptual hash). They appear inline in the
+transcript at the moment they occur, plus a gallery in the HTML.
 
-## After running
+## 2. Write the summary (always)
 
-Report the saved file path (the script logs `INFO: Saved to: ...` on the last stdout line). If the user asked to read or summarize it, read the file from `./Notes/` afterward.
+The run puts a placeholder (auto-picked key sentences) in the Summary section.
+Replace it with a real one:
+
+1. Read the `.md` the run reported (`INFO: Saved md: ...`). For a long video,
+   read the Transcript section in chunks. If screenshots were taken and the
+   video is technical (slides, code, diagrams), look at up to four of the
+   frames listed in the md to get slide content right.
+2. Write the summary to a file in the scratchpad (not the Notes folder), in
+   this shape — keep it tight, facts from the video only:
+
+   ```markdown
+   **TL;DR:** One or two sentences: what the video shows and its main takeaway.
+
+   ### Key points
+   - Point, with a timestamp link copied from the transcript: [04:44](https://www.youtube.com/watch?v=ID&t=284s)
+   - ...
+
+   ### Details worth keeping
+   - Names, versions, commands, numbers, links, and tools mentioned
+
+   ### Verdict
+   - (Only for reviews and opinions) The creator's conclusion and caveats.
+   ```
+
+3. Put it in place (updates the md and any HTML/txt/JSON siblings, offline):
+
+   ```bash
+   python3 "<skill>/scripts/run.py" add-summary "<path to .md>" "<summary file>"
+   ```
+
+A written summary survives later re-runs of the same video, so regenerating
+to add HTML or screenshots does not need step 2 again.
+
+## 3. Report
+
+Give the user the saved paths (`INFO: Saved ...` lines), the screenshot count,
+and the summary's TL;DR. Offer the HTML for viewing when it was made.
 
 ## Failure modes
 
-- **IP-blocked by YouTube** — surface the error verbatim; don't retry. If the venv has a newer `youtube-transcript-api` that got blocked, suggest pinning to an older version inside the venv (`pip install 'youtube-transcript-api<1.0'`) or running from a different network.
-- **Transcripts disabled on the video** — script exits non-zero with a clear error; surface it and stop.
-- **Bare ID not 11 chars** — ask the user to confirm the URL or ID rather than guessing.
-- **`-r -m full` missing deps** — tell the user to `pip install "deepmultilingualpunctuation>=1.0" "transformers<5" nltk` *inside the activated venv*, or drop back to `-m light`.
+- **IP-blocked / RequestBlocked** — show the error verbatim; do not retry.
+  The cache means anything fetched before still works. Suggest another network
+  later. `youtube-transcript-api` is pinned on purpose; don't upgrade it to fix this.
+- **Transcripts disabled / no captions in that language** — stop and say so;
+  for language, list `-l` choices if the error names them.
+- **Screenshots skipped** with a "Video download failed" warning — usually
+  no JavaScript runtime for yt-dlp's YouTube challenge. Node, Deno, or Bun on
+  PATH fixes it; the transcript and notes are still written.
+- **`-m full` missing deps** — inside the venv:
+  `pip install "deepmultilingualpunctuation>=1.0" "transformers<5" nltk`, or drop `-m full`.
+- **Bad ID** (not 11 characters) — ask the user for the URL rather than guessing.
+
+Warnings and errors are also logged to `yt-transcript.log` in the cache folder
+(`%LOCALAPPDATA%\yt-transcript`, `~/Library/Caches/yt-transcript`, or
+`~/.cache/yt-transcript`).

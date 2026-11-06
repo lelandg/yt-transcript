@@ -1,0 +1,340 @@
+"""Offline tests for the ytt package (no network)."""
+
+from pathlib import Path
+
+import pytest
+
+import yt_transcript
+from ytt import fetch, paths, render, shots, summary, text
+from ytt.models import Chapter, Paragraph, Segment, Shot, VideoData, fmt_time, parse_time
+
+
+def seg(start, text, dur=2.0):
+    return Segment(start, dur, text)
+
+
+# --------------------------------------------------------------------------- models
+
+
+@pytest.mark.parametrize("v,want", [("90", 90), ("1:30", 90), ("01:02:03", 3723), ("1m30s", 90), ("2h", 7200), ("12.5", 12.5)])
+def test_parse_time(v, want):
+    assert parse_time(v) == want
+
+
+def test_parse_time_rejects_garbage():
+    with pytest.raises(ValueError):
+        parse_time("abc")
+
+
+def test_fmt_time():
+    assert fmt_time(5) == "00:05"
+    assert fmt_time(3723) == "1:02:03"
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "https://www.youtube.com/watch?v=rCiLORb2QbY",
+        "https://youtu.be/rCiLORb2QbY?t=3",
+        "https://www.youtube.com/shorts/rCiLORb2QbY",
+        "https://www.youtube.com/embed/rCiLORb2QbY",
+        "https://www.youtube.com/live/rCiLORb2QbY",
+        "rCiLORb2QbY",
+    ],
+)
+def test_extract_video_id(url):
+    assert fetch.extract_video_id(url) == "rCiLORb2QbY"
+
+
+def test_extract_video_id_bad():
+    with pytest.raises(ValueError):
+        fetch.extract_video_id("not a video")
+
+
+def test_videodata_roundtrip():
+    d = VideoData("abcdefghijk", "u", "T", chapters=[Chapter(0, 5, "a")], segments=[seg(0, "hi")])
+    assert VideoData.from_dict(d.to_dict()) == d
+
+
+# --------------------------------------------------------------------------- text
+
+
+def test_tokenize_drops_inline_cues_and_marks_speakers():
+    items = text.tokenize([seg(0, "all stock [music]"), seg(2, ">> Okay, next"), seg(4, ">> [music]")])
+    words = [i for i in items if isinstance(i, text.Word)]
+    assert [w.text for w in words] == ["all", "stock", "Okay,", "next"]
+    assert words[2].speaker_change
+    cues = [i for i in items if not isinstance(i, text.Word)]
+    assert len(cues) == 1 and cues[0].label == "[music]"
+
+
+def test_word_times_interpolate_within_segment():
+    words = [i for i in text.tokenize([seg(10, "a b c d", dur=4)]) if isinstance(i, text.Word)]
+    assert [w.time for w in words] == [10, 11, 12, 13]
+
+
+def test_punctuated_paragraphs_keep_sentences_whole():
+    segs = [seg(0, "Okay, for this review, I'm using"), seg(2, "my bread bin, all stock [music]"), seg(4, "components. So, let's go.")]
+    paras = text.build_paragraphs(segs)
+    assert len(paras) == 1
+    assert "all stock components." in paras[0].text
+    assert "[music]" not in paras[0].text
+
+
+def test_paragraphs_break_at_chapters_and_carry_times():
+    segs = [seg(0, "First thing here."), seg(3, "More words now."), seg(10, "Second chapter text.")]
+    paras = text.build_paragraphs(segs, [Chapter(0, 10, "A"), Chapter(10, 20, "B")])
+    assert [p.chapter for p in paras] == [0, 1]
+    assert paras[1].start == 10
+
+
+def test_unpunctuated_captions_get_sentences():
+    words = " ".join(f"word{i}" for i in range(60))
+    paras = text.build_paragraphs([seg(0, words, dur=30)])
+    joined = " ".join(p.text for p in paras)
+    assert joined.count(".") >= 2
+    assert joined[0].isupper()
+
+
+def test_sentences_per_paragraph():
+    segs = [seg(i * 2, f"Sentence number {i}.") for i in range(9)]
+    paras = text.build_paragraphs(segs, sentences_per_paragraph=3)
+    assert len(paras) == 3
+
+
+def test_leading_music_cue_kept_once():
+    paras = text.build_paragraphs([seg(0, "[music]"), seg(1, "[music]"), seg(3, "Hello there.")])
+    assert paras[0].is_cue and paras[0].text == "[music]"
+    assert sum(p.is_cue for p in paras) == 1
+
+
+# --------------------------------------------------------------------------- paths
+
+
+def test_sanitize_filename():
+    assert paths.sanitize_filename("New OS for the C64? #commodore64 #retro") == "New OS for the C64"
+    assert paths.sanitize_filename('a<b>c:"d"/e') == "abcde"
+    assert paths.sanitize_filename("CON") == "CON_"
+    assert paths.sanitize_filename("   ") == "transcript"
+
+
+def test_output_dir_explicit(tmp_path):
+    d, why = paths.resolve_output_dir(str(tmp_path / "x"), None)
+    assert d == (tmp_path / "x").resolve() and why == "--directory"
+
+
+def test_output_dir_uses_repo_root(tmp_path):
+    (tmp_path / ".git").mkdir()
+    sub = tmp_path / "src" / "deep"
+    sub.mkdir(parents=True)
+    d, _ = paths.resolve_output_dir(None, str(sub))
+    assert d == tmp_path.resolve() / "Notes"
+
+
+def test_output_dir_plain_folder_and_existing_lowercase(tmp_path):
+    work = tmp_path / "work"
+    (work / "notes").mkdir(parents=True)
+    d, why = paths.resolve_output_dir(None, str(work))
+    assert d.name == "notes" and "working folder" in why
+
+
+def test_output_dir_falls_back_without_a_folder():
+    d, why = paths.resolve_output_dir(None, str(Path.home()))
+    assert d.parent == paths.TOOL_HOME and "no working folder" in why
+
+
+# --------------------------------------------------------------------------- summary
+
+
+def test_extractive_summary_is_ordered_and_bounded():
+    paras = [
+        Paragraph(i * 10, i * 10 + 5, f"The Commodore {i} computer runs a graphical operating system with windows and menus number {i}.")
+        for i in range(20)
+    ]
+    out = summary.extractive(paras, 4)
+    assert 1 <= len(out) <= 4
+    assert [t for t, _ in out] == sorted(t for t, _ in out)
+
+
+def test_md_to_html_subset():
+    h = summary.md_to_html("**TL;DR** it works\n\n- one `x`\n- two [link](https://a.b)\n\n1. first")
+    assert "<strong>TL;DR</strong>" in h and "<ul>" in h and "<code>x</code>" in h
+    assert '<a href="https://a.b">link</a>' in h and "<ol>" in h
+
+
+def test_md_to_html_escapes():
+    assert "&lt;script&gt;" in summary.md_to_html("<script>alert(1)</script>")
+
+
+def _sample():
+    data = VideoData("abcdefghijk", "https://www.youtube.com/watch?v=abcdefghijk", "Title #tag",
+                     chapters=[Chapter(0, 30, "Intro"), Chapter(30, 60, "Body")], duration=60)
+    paras = [Paragraph(0, 10, "Hello world.", 0), Paragraph(31, 40, "In the body.", 1)]
+    return data, paras
+
+
+def test_inject_updates_md_and_html(tmp_path):
+    data, paras = _sample()
+    md = tmp_path / "n.md"
+    md.write_text(render.render_md(data, paras, [], "auto"), encoding="utf-8")
+    md.with_suffix(".html").write_text(render.render_html(data, paras, [], "auto", tmp_path), encoding="utf-8")
+    changed = summary.inject(md, "**Written** summary")
+    assert len(changed) == 2
+    assert "**Written** summary" in md.read_text(encoding="utf-8")
+    assert "<strong>Written</strong>" in md.with_suffix(".html").read_text(encoding="utf-8")
+
+
+def test_regeneration_keeps_written_summary(tmp_path):
+    data, paras = _sample()
+    md = tmp_path / "n.md"
+    md.write_text(render.render_md(data, paras, [], "My own words."), encoding="utf-8")
+    assert yt_transcript._existing_written_summary(md, data.video_id) == "My own words."
+    auto = render.summary_block_md([(0, "x")], data, None)
+    md.write_text(render.render_md(data, paras, [], auto), encoding="utf-8")
+    assert yt_transcript._existing_written_summary(md, data.video_id) is None
+
+
+# --------------------------------------------------------------------------- render
+
+
+def test_layout_places_shots_and_chapters():
+    data, paras = _sample()
+    sh = [Shot(32, "f/shot.jpg", ["Chapter: Body"])]
+    kinds = [k for k, _ in render.layout(data, paras, sh)]
+    assert kinds == ["chapter", "para", "chapter", "shot", "para"]
+
+
+def test_render_md_and_html_content(tmp_path):
+    data, paras = _sample()
+    sh = [Shot(32, "Title_files/shot_00-32.jpg", ["Speaker cue: \"this slide\""])]
+    md = render.render_md(data, paras, sh, "S")
+    assert md.startswith("# Title\n")
+    assert "[00:31](https://www.youtube.com/watch?v=abcdefghijk&t=31s)" in md
+    assert "### 00:30 · Body" in md and "Title_files/shot_00-32.jpg" in md
+    h = render.render_html(data, paras, sh, "S", tmp_path)
+    assert "<title>Title</title>" in h and 'id="shot-32"' in h and summary.HTML_START in h
+
+
+def test_render_txt_and_json():
+    data, paras = _sample()
+    assert "[summary]\nS\n[/summary]" in render.render_txt(data, paras, [], "S")
+    assert '"summary_md": "S"' in render.render_json(data, paras, [], "S")
+
+
+# --------------------------------------------------------------------------- shots
+
+
+def test_cue_candidates_prefer_strong_phrases():
+    c = shots.cue_candidates([seg(10, "as you can see here the menu"), seg(20, "nothing to note"), seg(30, "this slide shows it")])
+    assert [x.time for x in c] == pytest.approx([10.5, 30.5])  # phrase time + settle delay
+    assert all(x.score >= 3 for x in c)
+
+
+def test_merge_sums_agreeing_signals_and_anchors_on_scene():
+    m = shots.merge([shots.Candidate(10, 3, ["Chapter: A"]), shots.Candidate(13, 2, ["Scene"], is_scene=True), shots.Candidate(40, 1, ["x"])])
+    assert len(m) == 2 and m[0].time == 13 and m[0].score == 5
+
+
+def test_select_respects_gap_and_limit():
+    cands = [shots.Candidate(t, s, []) for t, s in [(10, 5), (12, 4), (30, 3), (50, 2), (70, 1)]]
+    picked = shots.select(cands, 3, min_gap=8, duration=100)
+    assert sorted(c.time for c in picked) == [10, 30, 50]
+
+
+def test_heatmap_peaks():
+    hm = [{"start_time": i, "end_time": i + 1, "value": v} for i, v in enumerate([0.1, 0.9, 0.2, 0.3, 0.7, 0.1])]
+    assert [round(c.time, 1) for c in shots.heatmap_candidates(hm)] == [1.5, 4.5]
+
+
+def test_default_limit():
+    assert shots.default_limit(120) == 6 and shots.default_limit(707) == 12 and shots.default_limit(7200) == 24
+
+
+def test_shot_filename_is_portable():
+    assert shots.shot_filename(3723) == "shot_1-02-03.jpg"
+
+
+def test_md_to_html_autolinks():
+    assert '<a href="https://github.com/x/y">https://github.com/x/y</a>' in summary.md_to_html("Repo: <https://github.com/x/y>.")
+
+
+def test_noise_cues_dropped():
+    paras = text.build_paragraphs([seg(0, "[clears throat]"), seg(1, "Hello there.")])
+    assert not any(p.is_cue for p in paras)
+
+
+def test_summary_links_cannot_break_out_of_href():
+    h = summary.md_to_html('[x](https://h/"/onmouseover="alert(1))')
+    assert 'onmouseover="' not in h and "&quot;" in h
+
+
+def test_written_summary_not_carried_to_another_video(tmp_path):
+    data, paras = _sample()
+    md = tmp_path / "n.md"
+    md.write_text(render.render_md(data, paras, [], "Words about video A."), encoding="utf-8")
+    assert yt_transcript._existing_written_summary(md, "zzzzzzzzzzz") is None
+
+
+def test_strip_note_suffix_keeps_dots():
+    assert paths.strip_note_suffix("Talk v2.0") == "Talk v2.0"
+    assert paths.strip_note_suffix("Talk v2.0.md") == "Talk v2.0"
+    assert paths.sanitize_filename("CON.txt") == "CON.txt_"
+
+
+def test_sentence_end_inside_brackets_and_ie():
+    paras = text.build_paragraphs([seg(0, "He left (finally.) Then i.e. this works.")])
+    assert "(finally.) " in paras[0].text and "(finally.)." not in paras[0].text
+    assert "i.e." in paras[0].text
+
+
+def test_first_line_handles_empty_messages():
+    assert fetch.first_line(TimeoutError()) == "TimeoutError"
+    assert fetch.first_line(ValueError("a\nb")) == "a"
+
+
+def test_trailing_cue_emitted():
+    paras = text.build_paragraphs([seg(0, "Hello there."), seg(5, "Goodbye now."), seg(9, "[applause]")])
+    assert paras[-1].is_cue and paras[-1].text == "[applause]"
+
+
+def test_long_unpunctuated_run_in_punctuated_captions_splits():
+    body = " ".join(f"w{i}" for i in range(150))
+    segs = [seg(0, "Short one. Another one. And a third. " + body, dur=60)]
+    assert max(len(p.text.split()) for p in text.build_paragraphs(segs)) <= 130
+
+
+def test_full_model_warns_when_unavailable(caplog, monkeypatch):
+    monkeypatch.setattr(text, "restore_punctuation", lambda words: False)
+    with caplog.at_level("WARNING", logger="yt_transcript"):
+        text.build_paragraphs([seg(0, "hello there.")], model="full")
+    assert "-m full did not run" in caplog.text
+
+
+def test_raw_mode_keeps_chapters(tmp_path, monkeypatch):
+    data = VideoData("abcdefghijk", "https://www.youtube.com/watch?v=abcdefghijk", "T",
+                     chapters=[Chapter(0, 10, "A"), Chapter(10, 20, "B")], duration=20,
+                     segments=[seg(1, "one"), seg(12, "two")])
+    monkeypatch.setattr(fetch, "get_video", lambda *a, **k: data)
+    assert yt_transcript.main(["abcdefghijk", "--raw", "-d", str(tmp_path), "-q"]) == 0
+    md = (tmp_path / "T.md").read_text(encoding="utf-8")
+    assert md.index("### 00:00 · A") < md.index("one") < md.index("### 00:10 · B") < md.index("two")
+
+
+def test_rerun_refreshes_existing_siblings(tmp_path, monkeypatch):
+    data = VideoData("abcdefghijk", "https://www.youtube.com/watch?v=abcdefghijk", "T", duration=20,
+                     segments=[seg(1, "Hello there.")])
+    monkeypatch.setattr(fetch, "get_video", lambda *a, **k: data)
+    assert yt_transcript.main(["abcdefghijk", "--html", "-d", str(tmp_path), "-q"]) == 0
+    html_file = tmp_path / "T.html"
+    html_file.write_text("stale", encoding="utf-8")
+    assert yt_transcript.main(["abcdefghijk", "-d", str(tmp_path), "-q"]) == 0
+    assert html_file.read_text(encoding="utf-8").startswith("<!doctype html>")
+
+
+def test_fetch_error_keeps_full_message(tmp_path, monkeypatch, caplog):
+    def boom(*a, **k):
+        raise RuntimeError("Could not retrieve a transcript\nYouTube is blocking requests from your IP")
+    monkeypatch.setattr(fetch, "get_video", boom)
+    with caplog.at_level("ERROR", logger="yt_transcript"):
+        assert yt_transcript.main(["abcdefghijk", "-d", str(tmp_path), "-q"]) == 1
+    assert "blocking requests from your IP" in caplog.text

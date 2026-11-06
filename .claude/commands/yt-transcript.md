@@ -1,8 +1,8 @@
 ---
-description: Download a YouTube transcript into this project's Notes directory
-argument-hint: <youtube-url-or-video-id> [extra flags]
+description: Turn a YouTube video into notes (summary, chapters, timestamped transcript; optional HTML and screenshots) in this project's Notes folder
+argument-hint: <youtube-url-or-video-id> [--all | --html | -s | other flags]
 ---
 
-Invoke the `yt-transcript` skill to download the transcript for: $ARGUMENTS
+Invoke the `yt-transcript` skill for: $ARGUMENTS
 
-Use the bundled wrapper at `./.claude/skills/yt-transcript/scripts/run.ps1` (PowerShell) or `./.claude/skills/yt-transcript/scripts/run.sh` (Bash). Pass through any extra flags the user included (`-t`, `-r`, `-l <code>`, `-o <name>`, etc.). If no argument was provided, ask the user for a URL or video ID before running.
+Follow the skill: run `scripts/run.py` once with the URL and any flags the user gave (`--all`, `--html`, `-s`, `-l <code>`, `-o <name>`, ...), passing `--base-dir` set to the current working folder, then write the summary and put it in with `run.py add-summary`. If no URL or video ID was given, ask for one before running.

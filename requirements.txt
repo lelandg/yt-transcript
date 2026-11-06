@@ -1,7 +1,15 @@
-youtube-transcript-api>=1.0.0
+# Pinned on purpose: newer youtube-transcript-api releases trip YouTube's
+# bot-block far more often from the same residential IP. Bump deliberately.
+youtube-transcript-api==1.2.4
 
-# Optional: enables `--reformat --reformat-model full`
+# Metadata, chapters, and the video download for screenshots. [default] adds
+# yt-dlp-ejs, which solves YouTube's player challenge with deno/node/bun.
+yt-dlp[default]==2026.10.26
+
+# A static ffmpeg for every OS, used when ffmpeg is not on PATH.
+imageio-ffmpeg==0.6.0
+
+# Optional: enables `--reformat-model full` (ML punctuation restore).
 # Downloads a ~500MB HuggingFace model on first use.
-# NOTE: deepmultilingualpunctuation 1.0.1 is incompatible with transformers>=5
-# (removed `grouped_entities` kwarg). Pin transformers<5 until upstream updates.
+# deepmultilingualpunctuation 1.0.1 breaks with transformers>=5.
 #   pip install "deepmultilingualpunctuation>=1.0" "transformers<5" nltk
