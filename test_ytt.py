@@ -301,3 +301,40 @@ def test_long_unpunctuated_run_in_punctuated_captions_splits():
     body = " ".join(f"w{i}" for i in range(150))
     segs = [seg(0, "Short one. Another one. And a third. " + body, dur=60)]
     assert max(len(p.text.split()) for p in text.build_paragraphs(segs)) <= 130
+
+
+def test_full_model_warns_when_unavailable(caplog, monkeypatch):
+    monkeypatch.setattr(text, "restore_punctuation", lambda words: False)
+    with caplog.at_level("WARNING", logger="yt_transcript"):
+        text.build_paragraphs([seg(0, "hello there.")], model="full")
+    assert "-m full did not run" in caplog.text
+
+
+def test_raw_mode_keeps_chapters(tmp_path, monkeypatch):
+    data = VideoData("abcdefghijk", "https://www.youtube.com/watch?v=abcdefghijk", "T",
+                     chapters=[Chapter(0, 10, "A"), Chapter(10, 20, "B")], duration=20,
+                     segments=[seg(1, "one"), seg(12, "two")])
+    monkeypatch.setattr(fetch, "get_video", lambda *a, **k: data)
+    assert yt_transcript.main(["abcdefghijk", "--raw", "-d", str(tmp_path), "-q"]) == 0
+    md = (tmp_path / "T.md").read_text(encoding="utf-8")
+    assert md.index("### 00:00 · A") < md.index("one") < md.index("### 00:10 · B") < md.index("two")
+
+
+def test_rerun_refreshes_existing_siblings(tmp_path, monkeypatch):
+    data = VideoData("abcdefghijk", "https://www.youtube.com/watch?v=abcdefghijk", "T", duration=20,
+                     segments=[seg(1, "Hello there.")])
+    monkeypatch.setattr(fetch, "get_video", lambda *a, **k: data)
+    assert yt_transcript.main(["abcdefghijk", "--html", "-d", str(tmp_path), "-q"]) == 0
+    html_file = tmp_path / "T.html"
+    html_file.write_text("stale", encoding="utf-8")
+    assert yt_transcript.main(["abcdefghijk", "-d", str(tmp_path), "-q"]) == 0
+    assert html_file.read_text(encoding="utf-8").startswith("<!doctype html>")
+
+
+def test_fetch_error_keeps_full_message(tmp_path, monkeypatch, caplog):
+    def boom(*a, **k):
+        raise RuntimeError("Could not retrieve a transcript\nYouTube is blocking requests from your IP")
+    monkeypatch.setattr(fetch, "get_video", boom)
+    with caplog.at_level("ERROR", logger="yt_transcript"):
+        assert yt_transcript.main(["abcdefghijk", "-d", str(tmp_path), "-q"]) == 1
+    assert "blocking requests from your IP" in caplog.text

@@ -113,6 +113,15 @@ def build_parser() -> argparse.ArgumentParser:
     return p
 
 
+def _same_video(md_path: Path, video_id: str) -> bool:
+    """True when the notes file at md_path was written for this video."""
+    try:
+        head = md_path.read_text(encoding="utf-8").split(summary.MD_START, 1)[0]
+    except OSError:
+        return False
+    return f"v={video_id}" in head
+
+
 def _existing_written_summary(md_path: Path, video_id: str) -> str | None:
     """Keep a summary someone already wrote when the same video's notes are regenerated."""
     try:
@@ -153,15 +162,19 @@ def main(argv: list[str] | None = None) -> int:
     try:
         data = fetch.get_video(video_id, args.lang, refresh=args.refresh)
     except Exception as e:
-        msg = str(e).strip()
-        log.error("Failed to fetch transcript: %s", msg.splitlines()[0] if msg else type(e).__name__)
+        # Keep the whole message: youtube-transcript-api puts the actionable part
+        # (blocked IP, available languages) after a generic first line.
+        msg = str(e).strip() or "(no message)"
+        log.error("Failed to fetch transcript (%s): %s", type(e).__name__, msg)
         log.debug("details", exc_info=True)
         return 1
     log.info("Video title: %s", data.title)
 
     # Transcript -> paragraphs
     if args.raw:
-        paragraphs = [Paragraph(t, t, s) for t, s in text.plain_lines(data.segments)]
+        paragraphs = [
+            Paragraph(t, t, s, text.chapter_at(t, data.chapters)) for t, s in text.plain_lines(data.segments)
+        ]
     else:
         paragraphs = text.build_paragraphs(
             data.segments, data.chapters,
@@ -201,6 +214,13 @@ def main(argv: list[str] | None = None) -> int:
             log.info("Keeping the written summary already in %s", md_path.name)
     auto = [] if written else summary.extractive(paragraphs, args.summary_sentences)
     summary_md = render.summary_block_md(auto, data, written)
+
+    # Sibling outputs from an earlier run of this video are rewritten too, so
+    # they never point at screenshots this run replaced or removed.
+    for kind in ("html", "txt", "json"):
+        if not getattr(args, kind) and md_path.with_suffix(f".{kind}").exists() and _same_video(md_path, data.video_id):
+            setattr(args, kind, True)
+            log.info("Also refreshing the existing %s", md_path.with_suffix(f".{kind}").name)
 
     ts = not args.no_timestamps
     outputs = {"md": md_path}

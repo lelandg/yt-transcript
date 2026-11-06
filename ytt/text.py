@@ -8,10 +8,13 @@ what lets the output be both reformatted *and* timestamped in one pass.
 from __future__ import annotations
 
 import html
+import logging
 import re
 from dataclasses import dataclass
 
 from .models import Chapter, Paragraph, Segment
+
+log = logging.getLogger("yt_transcript")
 
 _CUE_RE = re.compile(r"\[[^\]]{1,40}\]")
 # Sound cues not worth a line in the notes ([music] and [applause] are kept).
@@ -184,7 +187,7 @@ def restore_punctuation(words: list[Word]) -> bool:
     return True
 
 
-def _chapter_at(t: float, chapters: list[Chapter]) -> int | None:
+def chapter_at(t: float, chapters: list[Chapter]) -> int | None:
     idx = None
     for i, c in enumerate(chapters):
         # Speech often starts a beat before the chapter marker the creator set.
@@ -205,8 +208,14 @@ def build_paragraphs(
     items = tokenize(segments)
     words = [it for it in items if isinstance(it, Word)]
     punctuated = is_punctuated(words)
-    if model == "full" and restore_punctuation(words):
-        punctuated = True
+    if model == "full":
+        if restore_punctuation(words):
+            punctuated = True
+        else:
+            log.warning(
+                "-m full did not run (needs: pip install \"deepmultilingualpunctuation>=1.0\" \"transformers<5\" nltk "
+                "in the venv, or the model changed the word count); used light formatting instead"
+            )
     sentences = split_sentences(words, punctuated)
 
     # Interleave sentences with standalone cues by time.
@@ -240,7 +249,7 @@ def build_paragraphs(
         pending_cue = None
         if c is None or (paragraphs and paragraphs[-1].is_cue and paragraphs[-1].text == c.label):
             return
-        paragraphs.append(Paragraph(c.time, c.time, c.label, _chapter_at(c.time, chapters), True))
+        paragraphs.append(Paragraph(c.time, c.time, c.label, chapter_at(c.time, chapters), True))
 
     for item in stream:
         if isinstance(item, _Cue):
@@ -252,7 +261,7 @@ def build_paragraphs(
             elif pending_cue is None:
                 pending_cue = item
             continue
-        ch = _chapter_at(item.start, chapters)
+        ch = chapter_at(item.start, chapters)
         words_in = sum(len(s.words) for s in cur)
         new_par = bool(cur) and (
             ch != cur_chapter
