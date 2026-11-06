@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.1] - 2026-11-06
+
+### Fixed
+- `run.sh` failed under WSL, Linux, and macOS when the repo was checked out on Windows (`set: pipefail: invalid option name`): `.gitattributes` now keeps `*.sh` and `*.py` at LF endings.
+- The launcher no longer reinstalls requirements when Windows and WSL share one checkout; its requirements hash ignores line endings.
+
 ## [0.1.0] - 2026-11-06
 
 ### Added

@@ -1,0 +1,5 @@
+# Shell and Python scripts must keep LF endings on every OS: a Windows checkout
+# with core.autocrlf=true would otherwise give them CRLF, which breaks bash
+# ("set: pipefail: invalid option name") and shebang lines under WSL/Linux/macOS.
+*.sh text eol=lf
+*.py text eol=lf

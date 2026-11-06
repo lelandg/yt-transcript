@@ -89,7 +89,8 @@ def ensure_venv(project: Path) -> Path:
     py = venv_python(venv)
 
     req = project / "requirements.txt"
-    want = hashlib.sha256(req.read_bytes()).hexdigest()
+    # Ignore line endings: a Windows checkout (CRLF) and WSL (LF) must agree.
+    want = hashlib.sha256(req.read_bytes().replace(b"\r\n", b"\n")).hexdigest()
     stamp = venv / ".ytt-requirements.sha256"
     have = stamp.read_text().strip() if stamp.exists() else ""
     if have != want:
