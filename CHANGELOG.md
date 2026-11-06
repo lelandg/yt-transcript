@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.4] - 2026-11-06
+
+### Fixed
+- A sibling file (`.html`, `.txt`, `.json`) whose owner cannot be read now blocks reuse of a notes name, since a re-run would rewrite it.
+- HTML written before v0.1.2 has no `yt-video-id` tag, so it is identified by its "Watch on YouTube" link. Existing notes keep their names.
+
 ## [0.1.3] - 2026-11-06
 
 ### Fixed
