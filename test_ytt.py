@@ -352,6 +352,9 @@ def test_nested_autolink_inside_link_cannot_inject():
     h = summary.md_to_html('[a](https://x/<https://evil/" onmouseover="alert(1)>)')
     assert "onmouseover=\"" not in h
     assert h.count("<a ") <= 1
+    # Without whitespace both patterns match; the old two-pass code nested an
+    # anchor inside href here. One pass keeps the autolink as plain URL text.
+    assert summary.md_to_html("[a](https://x/<https://evil/>)") == '<p><a href="https://x/&lt;https://evil/&gt;">a</a></p>'
 
 
 def test_link_text_still_gets_emphasis_and_urls_do_not():
@@ -426,6 +429,7 @@ def test_add_summary_updates_json(tmp_path):
 
 def test_setup_logging_does_not_stack_handlers():
     caller = _logging.NullHandler()
+    saved_level = yt_transcript.log.level
     yt_transcript.log.addHandler(caller)
     try:
         yt_transcript.setup_logging(False, True)
@@ -434,7 +438,65 @@ def test_setup_logging_does_not_stack_handlers():
         assert len(yt_transcript.log.handlers) == n
         assert caller in yt_transcript.log.handlers
     finally:
+        for h in [h for h in yt_transcript.log.handlers if getattr(h, "_ytt_owned", False)]:
+            yt_transcript.log.removeHandler(h)
+            h.close()
         yt_transcript.log.removeHandler(caller)
+        yt_transcript.log.setLevel(saved_level)
+
+
+def test_undecodable_note_is_an_ownership_conflict(tmp_path):
+    md = tmp_path / "x.md"
+    md.write_bytes(b"\xff\xfe\x00 not utf-8 v=abcdefghijk")
+    assert yt_transcript._same_video(md, "abcdefghijk") is False
+
+
+def test_leftover_siblings_without_md_count_as_taken(tmp_path):
+    (tmp_path / "T_files").mkdir()
+    assert yt_transcript._name_taken(tmp_path, "T", "abcdefghijk") is True
+    (tmp_path / "U.html").write_text("... watch?v=abcdefghijk ...", encoding="utf-8")
+    assert yt_transcript._name_taken(tmp_path, "U", "abcdefghijk") is False
+    assert yt_transcript._name_taken(tmp_path, "V", "abcdefghijk") is False
+
+
+def test_add_summary_rejects_non_object_json(tmp_path):
+    data, paras = _sample()
+    md = tmp_path / "n.md"
+    md.write_text(render.render_md(data, paras, [], "auto"), encoding="utf-8")
+    md.with_suffix(".json").write_text("[1, 2]", encoding="utf-8")
+    s = tmp_path / "s.md"
+    s.write_text("Written", encoding="utf-8")
+    before = md.read_text(encoding="utf-8")
+    assert add_summary.main([str(md), str(s)]) == 1
+    assert md.read_text(encoding="utf-8") == before
+
+
+def test_write_atomic_uses_unique_temp_and_cleans_up(tmp_path, monkeypatch):
+    target = tmp_path / "f.md"
+    summary.write_atomic(target, "one")
+    assert target.read_text(encoding="utf-8") == "one"
+
+    def boom(*a, **k):
+        raise OSError("disk full")
+    monkeypatch.setattr(summary.os, "replace", boom)
+    with pytest.raises(OSError):
+        summary.write_atomic(target, "two")
+    assert target.read_text(encoding="utf-8") == "one"
+    assert [p.name for p in tmp_path.iterdir()] == ["f.md"]
+
+
+def test_launcher_refuses_to_delete_a_preexisting_broken_venv(tmp_path, monkeypatch):
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("ytt_run", Path(__file__).parent / ".claude/skills/yt-transcript/scripts/run.py")
+    run = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(run)
+    tag = {"win32": ".venv_windows", "darwin": ".venv_mac"}.get(run.sys.platform, ".venv_linux")
+    broken = tmp_path / tag
+    broken.mkdir()
+    (broken / "keep.txt").write_text("someone's file", encoding="utf-8")
+    with pytest.raises(SystemExit):
+        run.ensure_venv(tmp_path)
+    assert (broken / "keep.txt").exists()
 
 
 def _fake_capture_env(monkeypatch, tmp_path):

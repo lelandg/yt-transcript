@@ -124,16 +124,39 @@ def _same_video(md_path: Path, video_id: str) -> bool:
     """True when the notes file at md_path was written for this video."""
     try:
         head = md_path.read_text(encoding="utf-8").split(summary.MD_START, 1)[0]
-    except OSError:
+    except (OSError, UnicodeDecodeError):  # unreadable: treat as someone else's
         return False
     return f"v={video_id}" in head
+
+
+def _name_taken(out_dir: Path, stem: str, video_id: str) -> bool:
+    """True when files under this name exist and are not this video's.
+
+    With the .md present, its header decides. Without it, leftover siblings
+    (.html/.txt/.json or the _files folder) still count as taken unless one of
+    them names this video, so a missing .md never lets us overwrite them.
+    """
+    md = out_dir / f"{stem}.md"
+    if md.exists():
+        return not _same_video(md, video_id)
+    siblings = [out_dir / f"{stem}{s}" for s in (".html", ".txt", ".json")]
+    present = [p for p in siblings if p.exists()]
+    if not present and not (out_dir / f"{stem}_files").exists():
+        return False
+    for p in present:
+        try:
+            if f"v={video_id}" in p.read_text(encoding="utf-8"):
+                return False
+        except (OSError, UnicodeDecodeError):
+            continue
+    return True
 
 
 def _existing_written_summary(md_path: Path, video_id: str) -> str | None:
     """Keep a summary someone already wrote when the same video's notes are regenerated."""
     try:
         t = md_path.read_text(encoding="utf-8")
-    except OSError:
+    except (OSError, UnicodeDecodeError):
         return None
     # Same filename, different video (e.g. a reused -o name): never carry it over.
     if f"v={video_id}" not in t.split(summary.MD_START, 1)[0]:
@@ -193,17 +216,16 @@ def main(argv: list[str] | None = None) -> int:
     out_dir.mkdir(parents=True, exist_ok=True)
     name = args.output or args.output_pos
     stem = paths.sanitize_filename(paths.strip_note_suffix(Path(name).name) if name else data.title)
-    md_path = out_dir / f"{stem}.md"
-    if md_path.exists() and not _same_video(md_path, data.video_id):
+    if _name_taken(out_dir, stem, data.video_id):
         # Another video already owns this name (same title, or a reused -o):
         # never overwrite its notes or delete its screenshots. Every fallback
         # name is checked the same way, since it can be taken too.
         base, n = stem, 1
-        while md_path.exists() and not _same_video(md_path, data.video_id):
+        while _name_taken(out_dir, stem, data.video_id):
             stem = f"{base} [{data.video_id}]" + (f" {n}" if n > 1 else "")
-            md_path = out_dir / f"{stem}.md"
             n += 1
-        log.warning("%s.md belongs to another video; writing %s.md instead", base, stem)
+        log.warning("%s belongs to another video; writing %s.md instead", base, stem)
+    md_path = out_dir / f"{stem}.md"
     log.info("Output folder: %s (%s)", out_dir, why)
 
     # Screenshots

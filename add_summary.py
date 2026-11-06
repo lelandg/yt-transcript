@@ -49,14 +49,26 @@ def main(argv: list[str] | None = None) -> int:
         except (OSError, ValueError) as e:
             print(f"ERROR: {js.name} is not valid JSON ({e}); nothing was changed", file=sys.stderr)
             return 1
+        if not isinstance(data, dict):
+            print(f"ERROR: {js.name} is not a JSON object; nothing was changed", file=sys.stderr)
+            return 1
     try:
         changed = inject(md, text)
     except ValueError as e:
         print(f"ERROR: {e}; nothing was changed", file=sys.stderr)
         return 1
+    except OSError as e:
+        print(f"ERROR: writing failed ({e}); some of {md.stem}.* may already be updated. "
+              f"Fix the cause and run this again to finish.", file=sys.stderr)
+        return 1
     if data is not None:
         data["summary_md"] = text.strip()
-        write_atomic(js, json.dumps(data, ensure_ascii=False, indent=1))
+        try:
+            write_atomic(js, json.dumps(data, ensure_ascii=False, indent=1))
+        except OSError as e:
+            print(f"ERROR: could not write {js.name} ({e}); the other files are already updated. "
+                  f"Run this again to finish.", file=sys.stderr)
+            return 1
         changed.append(js)
     for c in changed:
         print(f"Updated summary: {c}")

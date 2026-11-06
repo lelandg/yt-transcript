@@ -8,8 +8,10 @@ rewrites the Markdown and HTML siblings in place without refetching anything.
 
 from __future__ import annotations
 
+import contextlib
 import html
 import logging
+import tempfile
 import math
 import os
 import re
@@ -197,7 +199,13 @@ def inject(md_path: Path, summary_md: str) -> list[Path]:
 
 
 def write_atomic(path: Path, text: str) -> None:
-    """Write via a temp file + rename, so an interrupted write never truncates."""
-    tmp = path.with_name(path.name + ".tmp")
-    tmp.write_text(text, encoding="utf-8")
-    os.replace(tmp, path)
+    """Write via a unique temp file + rename, so an interrupted write never truncates."""
+    fd, tmp = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=path.parent)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8", newline="") as f:
+            f.write(text)
+        os.replace(tmp, path)
+    except BaseException:
+        with contextlib.suppress(OSError):
+            os.unlink(tmp)
+        raise

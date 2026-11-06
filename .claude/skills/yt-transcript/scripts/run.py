@@ -85,9 +85,16 @@ def ensure_venv(project: Path) -> Path:
             break
     else:
         venv = project / tag
+        if venv.exists():
+            # Never delete a folder this run did not create: it may hold someone's work.
+            sys.exit(
+                f"ERROR: {venv} exists but has no Python interpreter. "
+                f"Delete or rename it yourself, then run this again."
+            )
         say(f"Creating {venv}")
         if subprocess.run([sys.executable, "-m", "venv", str(venv)]).returncode != 0:
-            # A half-built venv (python but no pip) would be reused next time; remove it.
+            # We created it just now, so a half-built venv (python but no pip)
+            # is ours to remove; otherwise the next run would reuse it.
             shutil.rmtree(venv, ignore_errors=True)
             sys.exit(
                 f"ERROR: could not create {venv}. On Debian/Ubuntu install python3-venv "
